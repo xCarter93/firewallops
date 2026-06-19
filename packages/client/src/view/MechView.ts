@@ -20,10 +20,28 @@ import { MECH_BODY_W, MECH_BODY_H } from "../world.js";
  * cue; the barrel direction is owned entirely by the absolute angle (flipping
  * the barrel too would double-mirror it).
  */
+// --- Floating-above-mech HP widget (Phase 02.1, plan 03 — UI-SPEC) ---
+const HP_BAR_W = 64; // floating bar width (UI-SPEC: 64x8 above a 28px mech)
+const HP_BAR_H = 8;
+const HP_ANCHOR_OFFSET = 18; // body top edge − 18px, clear of cyan outline + barrel
+const HP_CRITICAL_FRAC = 0.25; // forced critical-red below 25% (Phase 2 parity)
+const HP_GREEN = 0x22c55e;
+const HP_RED = 0xef4444;
+const HP_SURFACE = 0x334155;
+const HP_TEXT = "#F8FAFC";
+const HP_TEXT_CRITICAL = "#EF4444";
+
 export class MechView {
   private readonly body: Phaser.GameObjects.Rectangle;
   private readonly barrel: Phaser.GameObjects.Line;
   private static readonly BARREL_LEN = 22;
+
+  // Floating HP widget — WORLD-space (NOT scroll-locked): it tracks the mech as
+  // the camera pans the larger world. Scroll-locking it would detach it from the
+  // mech (RESEARCH anti-pattern, threat T-02.1-08).
+  private readonly hpBar: Phaser.GameObjects.Graphics;
+  private readonly hpNum: Phaser.GameObjects.Text;
+  private hp = 100;
 
   constructor(
     private readonly scene: Phaser.Scene,
@@ -37,6 +55,74 @@ export class MechView {
     this.barrel = scene.add
       .line(x, y, 0, 0, MechView.BARREL_LEN, 0, 0xf8fafc)
       .setOrigin(0, 0.5);
+
+    // Floating HP bar + number. Deliberately left UNLOCKED to the camera (no
+    // scroll-factor zeroing) — these are world-space objects anchored above the
+    // mech, so they scroll with the camera (threat T-02.1-08).
+    this.hpBar = scene.add.graphics();
+    this.hpNum = scene.add
+      .text(x, y, "100", {
+        fontFamily: "'Share Tech Mono'",
+        fontSize: "16px",
+        color: HP_TEXT,
+      })
+      .setOrigin(0.5, 1);
+
+    // Draw once so the widget shows at match start (defaults to 100).
+    this.setHp(100);
+  }
+
+  /**
+   * Redraw the floating HP bar + number for the given HP, anchored above the
+   * current body position (single source of anchor math via updateHpLayout).
+   * 64x8 bar at body-top − 18px in WORLD coords; green→red lerp forced to
+   * critical-red below 25%; number always shown (color is not the only signal).
+   */
+  setHp(hp: number): void {
+    this.hp = hp;
+    this.updateHpLayout();
+  }
+
+  /**
+   * SINGLE shared anchor helper read by BOTH setHp and setPosition so the bar +
+   * number always agree on placement (no duplicated / stale anchor math). Reads
+   * the CURRENT body position so a settle-tween that moves the body re-anchors
+   * the widget correctly.
+   *
+   * COORDINATE NOTE (RESEARCH anti-pattern — do NOT double-negate): the sim
+   * encodes y-down already; the widget sits above the mech via a SINGLE
+   * subtraction (`y - MECH_BODY_H / 2 - 18`). No second negation.
+   */
+  private updateHpLayout(): void {
+    const x = this.body.x;
+    const y = this.body.y;
+    const barLeft = x - HP_BAR_W / 2; // centered on the 64px width over the mech
+    const barTop = y - MECH_BODY_H / 2 - HP_ANCHOR_OFFSET;
+
+    const frac = Phaser.Math.Clamp(this.hp / 100, 0, 1);
+    const critical = frac < HP_CRITICAL_FRAC;
+    const fillInt = critical ? HP_RED : MechView.lerpHpColor(frac);
+
+    const g = this.hpBar;
+    g.clear();
+    g.fillStyle(HP_SURFACE, 1);
+    g.fillRect(barLeft, barTop, HP_BAR_W, HP_BAR_H);
+    g.fillStyle(fillInt, 1);
+    g.fillRect(barLeft, barTop, HP_BAR_W * frac, HP_BAR_H);
+
+    // Number centered above the bar — ALWAYS rendered (a11y), critical-red <25%.
+    this.hpNum.setPosition(x, barTop - 2);
+    this.hpNum.setText(`${Math.max(0, Math.round(this.hp))}`);
+    this.hpNum.setColor(critical ? HP_TEXT_CRITICAL : HP_TEXT);
+  }
+
+  /** Manual HP_RED(0)->HP_GREEN(1) lerp returning a packed 0xRRGGBB int. */
+  private static lerpHpColor(frac: number): number {
+    const t = Phaser.Math.Clamp(frac, 0, 1);
+    const r = Math.round(((HP_RED >> 16) & 0xff) + (((HP_GREEN >> 16) & 0xff) - ((HP_RED >> 16) & 0xff)) * t);
+    const g = Math.round(((HP_RED >> 8) & 0xff) + (((HP_GREEN >> 8) & 0xff) - ((HP_RED >> 8) & 0xff)) * t);
+    const b = Math.round((HP_RED & 0xff) + ((HP_GREEN & 0xff) - (HP_RED & 0xff)) * t);
+    return (r << 16) | (g << 8) | b;
   }
 
   /**
@@ -62,16 +148,21 @@ export class MechView {
     }
   }
 
-  /** Move the whole mech (body + barrel pivot) — used when walking. */
+  /** Move the whole mech (body + barrel pivot + floating HP) — used when walking. */
   setPosition(x: number, y: number): void {
     this.body.setPosition(x, y);
     this.barrel.setPosition(x, y);
+    // Re-anchor the floating HP via the SAME helper so it tracks the mech (walk
+    // + settle-tween) and never agrees-by-accident with setHp.
+    this.updateHpLayout();
   }
 
-  /** Tear down both graphics (used on rematch rebuild). */
+  /** Tear down all graphics (used on rematch rebuild). */
   destroy(): void {
     this.body.destroy();
     this.barrel.destroy();
+    this.hpBar.destroy();
+    this.hpNum.destroy();
   }
 
   get x(): number {

@@ -218,6 +218,11 @@ export class MatchScene extends Phaser.Scene {
     this.mechViews[P2_ID].setActive(false);
     this.mechViews[P1_ID].setFacing(1);
     this.mechViews[P2_ID].setFacing(-1);
+    // MATCH START — initialize the floating HP for BOTH players (also covers the
+    // rematch path, which routes through buildMatch) so the opening state shows
+    // 100/100. Explicit player ids guarantee both are seeded.
+    this.mechViews[P1_ID].setHp(this.mechs[0].hp);
+    this.mechViews[P2_ID].setHp(this.mechs[1].hp);
     // Barrel uses the ABSOLUTE angle (relative angle through the active facing).
     this.mechViews[P1_ID].setBarrelAngle(this.absoluteAngle(1));
     this.mechViews[P2_ID].setBarrelAngle(this.absoluteAngle(-1));
@@ -234,13 +239,13 @@ export class MatchScene extends Phaser.Scene {
     // Rematch is available at any time the match is OVER.
     if (this.phase === "OVER") {
       if (Phaser.Input.Keyboard.JustDown(this.keyR)) this.rematch();
-      this.hud.update(this.controller.state, this.controller, this.selectedShotId, dtMs);
+      this.hud.update(this.controller.state, this.controller, this.selectedShotId, dtMs, this.power);
       return;
     }
 
     // While the shot resolves, ignore all aim/move/fire input (threat T-02-08).
     if (this.phase === "RESOLVING") {
-      this.hud.update(this.controller.state, this.controller, this.selectedShotId, dtMs);
+      this.hud.update(this.controller.state, this.controller, this.selectedShotId, dtMs, this.power);
       return;
     }
 
@@ -334,7 +339,7 @@ export class MatchScene extends Phaser.Scene {
       selectedShotId: this.selectedShotId,
     });
 
-    this.hud.update(this.controller.state, this.controller, this.selectedShotId, dtMs);
+    this.hud.update(this.controller.state, this.controller, this.selectedShotId, dtMs, this.power);
   }
 
   /**
@@ -369,6 +374,14 @@ export class MatchScene extends Phaser.Scene {
     // THE SEAM CALL — the only outcome-producing path (Phase 3 swap point).
     const result = this.controller.applyShot(aim, def);
 
+    // FIRE-TIME HP DROP (Phase-2 timing parity): applyShot has ALREADY decremented
+    // each damaged mech's hp synchronously above, so refresh the floating HP NOW —
+    // the instant the shot resolves logically — instead of waiting for the dot to
+    // land. Mirrors how the Phase-2 Hud reflected HP during RESOLVING.
+    for (const m of this.mechs) {
+      this.mechViews[m.id].setHp(m.hp);
+    }
+
     const totalDamage = result.damage.reduce((s, d) => s + d.amount, 0);
     const blastRadius = def.blastRadius;
 
@@ -389,6 +402,14 @@ export class MatchScene extends Phaser.Scene {
       // Destructible-terrain settle: any mech whose ground was carved out falls
       // to the new surface.
       this.settleMechs();
+
+      // IMPACT REFRESH (settle-safe): HP does not change at settle, but
+      // settleMechs() tweens mech POSITION — re-call setHp so the floating widget
+      // re-anchors via the shared layout helper and is never left at a stale
+      // pre-settle coordinate.
+      for (const m of this.mechs) {
+        this.mechViews[m.id].setHp(m.hp);
+      }
 
       if (impact) {
         this.fx.explode(impact, blastRadius);
