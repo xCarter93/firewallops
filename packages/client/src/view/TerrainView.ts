@@ -21,7 +21,14 @@ import type { Carve } from "@shared/sim";
  */
 export class TerrainView {
   private static readonly FIELD = 0x0f172a; // UI-SPEC dominant (sky/backdrop)
-  private static readonly BODY = 0x1e293b; // UI-SPEC secondary (terrain body)
+  // Tuning pass (02-04 NO-GO fix 1): the old terrain body `#1E293B` is almost
+  // identical to the `#0F172A` field, so craters were invisible. Repaint the
+  // body in a distinctly lighter slate (`#475569`, UI-SPEC slate-600 family) so
+  // the filled terrain reads clearly against the dark sky and carved craters
+  // (erased back to the dark field) pop. A brighter top-edge highlight line
+  // (`#64748B`) traces the surface for extra readability.
+  private static readonly BODY = 0x475569; // visible terrain body (slate-600)
+  private static readonly SURFACE_HL = 0x64748b; // top-edge highlight (slate-500)
   private static readonly ERASE_KEY = "carve-circle";
 
   private static readonly TEXTURE_KEY = "terrain";
@@ -64,7 +71,9 @@ export class TerrainView {
     g.fillStyle(TerrainView.FIELD, 1);
     g.fillRect(0, 0, width, height);
 
+    // Body fill (lighter slate so it stands clear of the dark field).
     g.fillStyle(TerrainView.BODY, 1);
+    const tops: number[] = new Array(width).fill(-1);
     for (let x = 0; x < width; x++) {
       let topSolid = -1;
       for (let y = 0; y < height; y++) {
@@ -73,8 +82,18 @@ export class TerrainView {
           break;
         }
       }
+      tops[x] = topSolid;
       if (topSolid >= 0) {
         g.fillRect(x, topSolid, 1, height - topSolid);
+      }
+    }
+
+    // Optional surface highlight: a 2px brighter line along the terrain top edge
+    // so the ground silhouette reads even where body/field contrast is subtle.
+    g.fillStyle(TerrainView.SURFACE_HL, 1);
+    for (let x = 0; x < width; x++) {
+      if (tops[x] >= 0) {
+        g.fillRect(x, tops[x], 1, 2);
       }
     }
 

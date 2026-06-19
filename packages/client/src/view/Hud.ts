@@ -36,7 +36,21 @@ const MOVE_H = 8;
 const PIP_R = 5;
 const PIP_GAP = 4; // xs
 const MARGIN = 24; // lg: HUD inset from screen edge
-const CLUSTER_W = 160;
+const CLUSTER_W = 180;
+
+// Wind widget rows (top-center), each clear of the next (no overlap).
+const WIND_ARROW_Y = MARGIN + 22; // arrow centerline, below the "WIND" label
+const WIND_NUM_Y = MARGIN + 34; // magnitude number, below the arrow
+
+// Player-cluster row offsets (from the cluster `top`). Each widget on its own
+// row so nothing overlaps (02-04 NO-GO fix 4). The draw helpers read these back.
+const ROW_HP_LABEL = 22; // "HP" caption
+const ROW_HP_BAR = 38; // HP bar top (12px tall)
+const ROW_PIPS = 62; // charge-pip centerline
+const ROW_TROJAN = 74; // TROJAN status text
+const ROW_MOVE_LABEL = 94; // "MOVE" caption
+const ROW_MOVE_BAR = 110; // MOVE bar top
+const CLUSTER_H = 134; // highlight box height enclosing all rows
 
 const LABEL_STYLE = {
   fontFamily: "'Fira Code'",
@@ -97,29 +111,32 @@ export class Hud {
     const cam = scene.cameras.main;
     this.w = cam.width;
 
-    // --- WIND (PLAY-05), top-center ---
+    // --- WIND (PLAY-05), top-center. Stacked in CLEAR rows so the label, the
+    // arrow, and the magnitude never overlap (02-04 NO-GO fix 4): label on top,
+    // arrow on its own row below, number under the arrow. ---
     this.windLabel = this.lock(
       scene.add.text(this.w / 2, MARGIN, "WIND", LABEL_STYLE).setOrigin(0.5, 0),
     );
-    this.windArrow = this.lock(scene.add.graphics());
+    this.windArrow = this.lock(scene.add.graphics()); // drawn at WIND_ARROW_Y
     this.windNum = this.lock(
       scene.add
-        .text(this.w / 2, MARGIN + 20, "0", NUM_STYLE)
+        .text(this.w / 2, WIND_NUM_Y, "0", NUM_STYLE)
         .setOrigin(0.5, 0),
     );
 
-    // --- NEXT marker (delay queue, PLAY-06) ---
+    // --- NEXT marker (delay queue, PLAY-06), below the wind magnitude ---
     this.nextLabel = this.lock(
       scene.add
-        .text(this.w / 2, MARGIN + 50, "NEXT ▸ -", LABEL_STYLE)
+        .text(this.w / 2, WIND_NUM_Y + 30, "NEXT ▸ -", LABEL_STYLE)
         .setOrigin(0.5, 0),
     );
 
     // --- Per-player clusters: P1 left, P2 right (xl apart via screen edges) ---
     playerIds.forEach((id, i) => {
       const left = i === 0;
+      // Right-align P2 so the whole CLUSTER_W stays inside the canvas (no clip).
       const x = left ? MARGIN : this.w - MARGIN - CLUSTER_W;
-      this.clusters[id] = this.buildCluster(id, x, left);
+      this.clusters[id] = this.buildCluster(id, x);
     });
 
     // --- Pre-match onboarding hint ---
@@ -170,61 +187,72 @@ export class Hud {
     );
   }
 
-  /** Build one player's HUD cluster anchored at screen X `x`. */
-  private buildCluster(id: string, x: number, left: boolean): PlayerCluster {
+  /**
+   * Build one player's HUD cluster anchored at screen X `x`.
+   *
+   * Layout (02-04 NO-GO fix 4): every widget gets its OWN row so nothing
+   * overlaps. The SHOT indicator sits on the header row (clear of the HP bar +
+   * number below it); HP bar, pips, TROJAN status, and MOVE each stack on the
+   * `ROW_*` offsets the draw helpers read back. P2's cluster is anchored so its
+   * full CLUSTER_W stays inside the canvas (no right-edge clipping).
+   */
+  private buildCluster(id: string, x: number): PlayerCluster {
     const s = this.scene;
     const label = id.toUpperCase();
     const top = MARGIN;
 
     const highlight = this.lock(
       s.add
-        .rectangle(x - 6, top - 6, CLUSTER_W + 12, 96)
+        .rectangle(x - 8, top - 8, CLUSTER_W + 16, CLUSTER_H)
         .setOrigin(0, 0)
         .setFillStyle() // outline-only — clear the default black fill
         .setStrokeStyle(2, CYAN)
         .setVisible(false),
     );
 
+    // Header row: "P1" label (left) + SHOT indicator (far edge of the cluster).
     const labelText = this.lock(
       s.add.text(x, top, label, LABEL_STYLE).setOrigin(0, 0),
     );
+    const shot = this.lock(
+      s.add
+        .text(x + CLUSTER_W, top, "SHOT 1", { ...NUM_STYLE, fontSize: "18px" })
+        .setOrigin(1, 0),
+    );
 
-    // "HP" field caption (UI-SPEC field label; color is not the only signal).
+    // Row 1: "HP" caption + bar + number.
     this.lock(
       s.add
-        .text(x + 40, top, "HP", { ...LABEL_STYLE, fontSize: "12px" })
+        .text(x, top + ROW_HP_LABEL, "HP", { ...LABEL_STYLE, fontSize: "12px" })
         .setOrigin(0, 0),
     );
-
     const hpBar = this.lock(s.add.graphics());
     const hpNum = this.lock(
-      s.add.text(x + HP_W + 8, top + 18, "100", NUM_STYLE).setOrigin(0, 0.5),
+      s.add
+        .text(x + HP_W + 8, top + ROW_HP_BAR + HP_H / 2, "100", NUM_STYLE)
+        .setOrigin(0, 0.5),
     );
 
+    // Row 2: charge pips.
     const pips = this.lock(s.add.graphics());
 
+    // Row 3: TROJAN status line.
     const trojan = this.lock(
       s.add
-        .text(x, top + 50, "TROJAN — LOCKED · LAND 3 HITS TO ARM", {
+        .text(x, top + ROW_TROJAN, "TROJAN — LOCKED · LAND 3 HITS TO ARM", {
           ...LABEL_STYLE,
           fontSize: "12px",
         })
         .setOrigin(0, 0),
     );
 
+    // Row 4: MOVE label + depleting bar.
     const moveLabel = this.lock(
-      s.add.text(x, top + 68, "MOVE", LABEL_STYLE).setOrigin(0, 0),
+      s.add
+        .text(x, top + ROW_MOVE_LABEL, "MOVE", { ...LABEL_STYLE, fontSize: "12px" })
+        .setOrigin(0, 0),
     );
     const moveBar = this.lock(s.add.graphics());
-
-    const shot = this.lock(
-      s.add
-        .text(left ? x + CLUSTER_W : x, top, "SHOT 1", {
-          ...NUM_STYLE,
-          fontSize: "18px",
-        })
-        .setOrigin(left ? 1 : 0, 0),
-    );
 
     return {
       highlight,
@@ -306,7 +334,7 @@ export class Hud {
     const g = this.windArrow;
     g.clear();
     const cx = this.w / 2;
-    const cy = MARGIN + 12;
+    const cy = WIND_ARROW_Y;
     const dir = wind >= 0 ? 1 : -1;
     const len = 10 + Math.min(40, (Math.abs(wind) / 80) * 40);
 
@@ -332,7 +360,7 @@ export class Hud {
 
     const g = cl.hpBar;
     const x = cl.label.x;
-    const y = (cl.label.y as number) + 22;
+    const y = (cl.label.y as number) + ROW_HP_BAR;
     g.clear();
     g.fillStyle(SURFACE, 1);
     g.fillRect(x, y, HP_W, HP_H);
@@ -357,7 +385,7 @@ export class Hud {
   private drawPips(cl: PlayerCluster, charge: number, armed: boolean): void {
     const g = cl.pips;
     const x = cl.label.x;
-    const y = (cl.label.y as number) + 40;
+    const y = (cl.label.y as number) + ROW_PIPS;
     g.clear();
 
     // Armed pulse: oscillate opacity (NO scale transform — stable-animation rule).
@@ -376,7 +404,7 @@ export class Hud {
     const frac = Phaser.Math.Clamp(budget / MOVE_BUDGET_PER_TURN, 0, 1);
     const g = cl.moveBar;
     const x = cl.label.x;
-    const y = (cl.label.y as number) + 86;
+    const y = (cl.label.y as number) + ROW_MOVE_BAR;
     g.clear();
     g.fillStyle(SURFACE, 1);
     g.fillRect(x, y, MOVE_W, MOVE_H);
