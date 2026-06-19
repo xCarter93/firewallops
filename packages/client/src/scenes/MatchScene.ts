@@ -58,6 +58,16 @@ const PAN_MS = 500; // frame-next-mech camera pan (UI-SPEC max)
 const MAX_SHAKE_MS = 300;
 const SHAKE_PER_DAMAGE = 0.0006; // shake amplitude per HP of total damage
 
+// --- Camera framing (CAM-02). The active mech is framed in the UPPER part of
+// the viewport so it clears the bottom bar + its floating HP. ---
+const BAR_CLEARANCE = 96; // bottom-bar height to clear (matches plan 03 BAR_H = 96)
+// How far BELOW the mech the camera target sits. centerOn(x, y) puts world-y `y`
+// at viewport center (~256/512), so centering on `mech.y + FRAME_OFFSET_Y` pushes
+// the mech UP to viewport-y ≈ 256 − 110 = ~146 — well above the bar top at
+// viewport-y 416 (512 − 96). setBounds clamps near world edges so this never
+// reveals past the top/bottom of the world.
+const FRAME_OFFSET_Y = 110;
+
 type Phase = "AIM" | "RESOLVING" | "OVER";
 
 export class MatchScene extends Phaser.Scene {
@@ -82,6 +92,11 @@ export class MatchScene extends Phaser.Scene {
   private dragStartPower = 0;
   private selectedShotId: ShotId = "shot-1";
 
+  // Right-drag free-pan latch (CAM-01): set true on a manual right-drag pan so
+  // the AIM-phase auto-frame (guarded by `!manualPan`) stops yanking the camera
+  // back. Cleared by initial framing, C-recenter, fire, turn-start, and rematch.
+  private manualPan = false;
+
   // Input handles.
   private cursors!: Phaser.Types.Input.Keyboard.CursorKeys;
   private space!: Phaser.Input.Keyboard.Key;
@@ -89,6 +104,7 @@ export class MatchScene extends Phaser.Scene {
   private key2!: Phaser.Input.Keyboard.Key;
   private key3!: Phaser.Input.Keyboard.Key;
   private keyR!: Phaser.Input.Keyboard.Key;
+  private keyC!: Phaser.Input.Keyboard.Key;
 
   constructor() {
     super("Match");
@@ -121,10 +137,15 @@ export class MatchScene extends Phaser.Scene {
     this.key2 = kb.addKey(Phaser.Input.Keyboard.KeyCodes.TWO);
     this.key3 = kb.addKey(Phaser.Input.Keyboard.KeyCodes.THREE);
     this.keyR = kb.addKey(Phaser.Input.Keyboard.KeyCodes.R);
+    this.keyC = kb.addKey(Phaser.Input.Keyboard.KeyCodes.C);
 
-    // Mouse-drag power (precise) on the same 0-100 scale as the gauge.
+    // Mouse-drag power (precise) on the same 0-100 scale as the gauge. Gated on
+    // an EXPLICIT left-button press (Open Q3): a right/middle/ambiguous press
+    // never starts a power drag, so left-drag power and right-drag pan are
+    // mutually exclusive by button (Pitfall 2).
     this.input.on("pointerdown", (p: Phaser.Input.Pointer) => {
       if (this.phase !== "AIM") return;
+      if (!p.leftButtonDown()) return;
       this.dragMode = true;
       this.dragStartX = p.x;
       this.dragStartPower = this.power;
@@ -132,6 +153,33 @@ export class MatchScene extends Phaser.Scene {
     this.input.on("pointerup", () => {
       this.dragMode = false;
     });
+
+    // Right-drag free pan (CAM-01): scroll the camera by the INVERSE pointer
+    // delta so the world tracks the cursor 1:1. setBounds (above) auto-clamps
+    // scroll to the world edges, so no manual clamp is needed. Sets the
+    // manualPan latch so the AIM auto-frame leaves the manual pan alone.
+    this.input.on("pointermove", (p: Phaser.Input.Pointer) => {
+      if (!p.rightButtonDown()) return;
+      const cam = this.cameras.main;
+      cam.scrollX -= p.x - p.prevPosition.x;
+      cam.scrollY -= p.y - p.prevPosition.y;
+      this.manualPan = true;
+    });
+
+    // Suppress the browser context menu so right-drag is usable (Pitfall 4), and
+    // tear the listener down on scene shutdown so it never accumulates across
+    // scene restarts (reviewer concern #8 — no leaked listener).
+    const onContextMenu = (e: Event) => e.preventDefault();
+    this.game.canvas.addEventListener("contextmenu", onContextMenu);
+    this.events.once(Phaser.Scenes.Events.SHUTDOWN, () =>
+      this.game.canvas.removeEventListener("contextmenu", onContextMenu),
+    );
+
+    // INITIAL FRAMING (concern #4): frame the active mech ABOVE the bottom bar
+    // on match start — without this the camera opens at scroll (0,0) on the
+    // world's top-left quadrant. Instant (animate: false) for the opening frame.
+    this.frameOnMech(this.activeMech(), false);
+    this.manualPan = false;
   }
 
   /**
@@ -245,6 +293,18 @@ export class MatchScene extends Phaser.Scene {
       this.power = Phaser.Math.Clamp(this.dragStartPower + delta, 0, 100);
     }
 
+    // --- C recenter (manual override): pan back to the active mech, framed
+    // above the bar, and clear the latch (UI-SPEC: "Overrides a manual pan"). ---
+    if (Phaser.Input.Keyboard.JustDown(this.keyC)) {
+      this.frameOnMech(this.activeMech(), true);
+      this.manualPan = false;
+    }
+
+    // --- LATCH IS READ (concern #3): re-frame the active mech only when it has
+    // drifted out of the safe band AND no manual pan is latched. The `!manualPan`
+    // guard is the genuine READ that lets a manual pan survive aim/move. ---
+    if (!this.manualPan) this.keepActiveMechFramed();
+
     // --- Shot select (1/2/3); Trojan only when armed ---
     if (Phaser.Input.Keyboard.JustDown(this.key1)) this.selectedShotId = "shot-1";
     if (Phaser.Input.Keyboard.JustDown(this.key2)) this.selectedShotId = "shot-2";
@@ -284,6 +344,9 @@ export class MatchScene extends Phaser.Scene {
   private fire(active: Mech, activeView: MechView): void {
     this.phase = "RESOLVING";
     this.hud.clearIntro();
+    // Firing overrides any manual pan from aim — the follow-cam takes over (the
+    // existing startFollow below follows BOTH x and y, so vertical follow is free).
+    this.manualPan = false;
 
     const def = LOADOUT[this.selectedShotId];
 
@@ -346,6 +409,9 @@ export class MatchScene extends Phaser.Scene {
 
   /** Advance the delay queue, reroll wind, frame the next mech, check the win. */
   private afterImpact(): void {
+    // Turn change overrides a manual pan (UI-SPEC: "Overrides any manual pan").
+    this.manualPan = false;
+
     const winnerId = this.controller.checkWin();
     if (winnerId) {
       this.endMatch(winnerId);
@@ -371,10 +437,11 @@ export class MatchScene extends Phaser.Scene {
     if (nextPlayer) nextPlayer.moveBudget = MOVE_BUDGET_PER_TURN;
     this.controller.rollWind();
 
-    // Frame the next active mech.
+    // Frame the next active mech ABOVE the bottom bar (shared helper so the bar
+    // clearance is consistent with the opening frame / C-recenter / rematch).
     const nextMech = this.mechs.find((m) => m.id === nextId);
     if (nextMech) {
-      this.cameras.main.pan(nextMech.x, nextMech.y, PAN_MS, "Quad.easeInOut");
+      this.frameOnMech(nextMech, true);
     }
 
     // Reset aim for the next turn and re-enable input.
@@ -413,7 +480,9 @@ export class MatchScene extends Phaser.Scene {
 
     const p1 = this.mechs[0];
     this.cameras.main.stopFollow();
-    this.cameras.main.centerOn(p1.x, p1.y);
+    // Frame P1 above the bar (instant) and clear any stale latch for a fresh match.
+    this.frameOnMech(p1, false);
+    this.manualPan = false;
   }
 
   /**
@@ -495,6 +564,48 @@ export class MatchScene extends Phaser.Scene {
     const m = this.mechs.find((mech) => mech.id === id);
     if (!m) throw new Error(`active mech ${id} not found`);
     return m;
+  }
+
+  /**
+   * Single source of the bottom-bar-clearing framing offset. Centers the camera
+   * on `mech.x, mech.y + FRAME_OFFSET_Y` so the mech sits in the UPPER part of
+   * the viewport, clear of the 96px bottom bar + its floating HP. Used by the
+   * initial frame, C-recenter, turn-start, and rematch so the clearance is
+   * identical everywhere. setBounds clamps the target near the world edges.
+   */
+  private frameOnMech(mech: Mech, animate: boolean): void {
+    const cam = this.cameras.main;
+    if (animate) {
+      cam.pan(mech.x, mech.y + FRAME_OFFSET_Y, PAN_MS, "Quad.easeInOut");
+    } else {
+      cam.centerOn(mech.x, mech.y + FRAME_OFFSET_Y);
+    }
+  }
+
+  /**
+   * Re-frame the active mech ONLY when it has drifted out of a central safe band
+   * — so aim/walk does not fight the camera every frame, but a mech walked to the
+   * screen edge (or down toward the bar) is brought back. Skipped entirely while
+   * `manualPan` is latched (the caller guards with `!this.manualPan`), which is
+   * how a manual right-drag pan genuinely survives aim/move.
+   *
+   * Safe-band thresholds (discretion-owned framing math, documented in SUMMARY):
+   *  - horizontal: 15% inset from each viewport edge
+   *  - vertical (bottom): re-frame if the mech sits below the bar-top minus a
+   *    24px margin (i.e. it is drifting toward/behind the 96px bar)
+   */
+  private keepActiveMechFramed(): void {
+    const active = this.activeMech();
+    const cam = this.cameras.main;
+    const view = cam.worldView;
+    const xInset = cam.width * 0.15;
+    const leftBound = view.x + xInset;
+    const rightBound = view.right - xInset;
+    const bottomBound = view.y + (cam.height - BAR_CLEARANCE) - 24;
+
+    if (active.x < leftBound || active.x > rightBound || active.y > bottomBound) {
+      this.frameOnMech(active, true);
+    }
   }
 
   /** The active player's turn-economy state (holds the aim `facing`). */
