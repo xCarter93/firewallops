@@ -1,35 +1,38 @@
 import Phaser from "phaser";
 import { TerrainMask } from "@shared/sim";
-import type { Carve } from "@shared/sim";
 
 /**
  * Cosmetic terrain layer (Phase 2, plan 03).
  *
  * A Phaser 4 `DynamicTexture` that MIRRORS the `@shared/sim` collision mask.
  * The mask is the collision authority (consulted for physics); this texture is
- * purely what the player sees. It is built once from the mask and then carved
- * in lockstep with the mask via `applyCarves` (called in plan 04 when shots
- * land), so the visible craters always match the authoritative holes.
+ * purely what the player sees. It is built once from the mask and then
+ * REPAINTED from the (already-carved) mask in lockstep after each shot lands
+ * (`repaintFromMask`), so the visible craters always match the authoritative
+ * holes exactly.
  *
- * Phaser 4 note (RESEARCH Pitfall 3): every batch of draws/erases into a
+ * Why repaint instead of `dt.erase`: erasing circles out of a DynamicTexture
+ * depends on Phaser's ERASE blend-mode + the eraser object's render state,
+ * which proved unreliable here (craters carved in the mask but invisible on
+ * screen). Repainting the whole field from the mask is the cheap, deterministic
+ * mirror — the mask is the single source of truth and is already carved by
+ * `applyShot`, so the texture can never drift from collision. A full repaint is
+ * O(width·height) but runs at most once per turn (negligible).
+ *
+ * Phaser 4 note (RESEARCH Pitfall 3): every batch of draws into a
  * DynamicTexture MUST be flushed with an explicit `dt.render()` or nothing
- * shows. We flush once after building and once after each carve batch.
+ * shows. We flush once after each paint.
  *
  * This file lives under view/** so it MUST NOT import the sim's outcome
  * functions (resolveShot/simulateTrajectory/quantizeCarve) — ESLint guard.
- * Importing TerrainMask (the mask type) and Carve (a data type) is allowed.
+ * Importing TerrainMask (the mask type) is allowed.
  */
 export class TerrainView {
   private static readonly FIELD = 0x0f172a; // UI-SPEC dominant (sky/backdrop)
-  // Tuning pass (02-04 NO-GO fix 1): the old terrain body `#1E293B` is almost
-  // identical to the `#0F172A` field, so craters were invisible. Repaint the
-  // body in a distinctly lighter slate (`#475569`, UI-SPEC slate-600 family) so
-  // the filled terrain reads clearly against the dark sky and carved craters
-  // (erased back to the dark field) pop. A brighter top-edge highlight line
-  // (`#64748B`) traces the surface for extra readability.
+  // The terrain body must read clearly against the dark `#0F172A` field, so a
+  // carved crater (repainted back to the dark field) is obviously visible.
   private static readonly BODY = 0x475569; // visible terrain body (slate-600)
   private static readonly SURFACE_HL = 0x64748b; // top-edge highlight (slate-500)
-  private static readonly ERASE_KEY = "carve-circle";
 
   private static readonly TEXTURE_KEY = "terrain";
 
@@ -39,18 +42,15 @@ export class TerrainView {
     private readonly image: Phaser.GameObjects.Image,
   ) {}
 
-  /** The live DynamicTexture handle (passed to MatchScene via scene data). */
+  /** The live DynamicTexture handle. */
   get texture(): Phaser.Textures.DynamicTexture {
     return this.dt;
   }
 
   /**
-   * Build the cosmetic terrain texture from the collision mask.
-   *
-   * Fills the whole field with the dominant dark color, then paints the
-   * terrain body where the mask is solid using a cheap per-column fill: for
-   * each x find the topmost solid y and draw one filled rect from that y to
-   * the bottom (matches the harness column-paint; the mask is ground-is-larger-y).
+   * Build the cosmetic terrain texture from the collision mask and add it to the
+   * scene at the world origin. MUST be called from the scene that renders the
+   * match (the world Image lives on that scene's display list).
    */
   static build(scene: Phaser.Scene, mask: TerrainMask): TerrainView {
     const { width, height } = mask;
@@ -66,12 +66,44 @@ export class TerrainView {
       throw new Error("TerrainView.build: addDynamicTexture returned null");
     }
 
-    // Build the paint with a single Graphics object, then stamp it into the dt.
+    TerrainView.paint(scene, dt, mask);
+
+    const image = scene.add.image(0, 0, TerrainView.TEXTURE_KEY).setOrigin(0, 0);
+
+    return new TerrainView(scene, dt, image);
+  }
+
+  /**
+   * Repaint the cosmetic layer from the current (carved) mask so visible craters
+   * mirror the authoritative holes. Called after each shot resolves (PLAY-04) —
+   * the mask was already carved inside `applyShot`, so this just re-mirrors it.
+   */
+  repaintFromMask(mask: TerrainMask): void {
+    TerrainView.paint(this.scene, this.dt, mask);
+  }
+
+  /**
+   * Paint the field + terrain body + surface highlight from the mask into the
+   * DynamicTexture. Fills the whole field with the dominant dark color (so any
+   * carved/non-solid cell shows the dark field), then paints the body where the
+   * mask is solid via a cheap per-column fill (topmost solid y down to the
+   * bottom; the mask is ground-is-larger-y, matching the harness column-paint).
+   */
+  private static paint(
+    scene: Phaser.Scene,
+    dt: Phaser.Textures.DynamicTexture,
+    mask: TerrainMask,
+  ): void {
+    const { width, height } = mask;
+
     const g = scene.add.graphics();
+
+    // Opaque field over the whole texture — this also erases the prior paint on
+    // a repaint (full-coverage, src-alpha 1 replaces).
     g.fillStyle(TerrainView.FIELD, 1);
     g.fillRect(0, 0, width, height);
 
-    // Body fill (lighter slate so it stands clear of the dark field).
+    // Body fill where the mask is solid.
     g.fillStyle(TerrainView.BODY, 1);
     const tops: number[] = new Array(width).fill(-1);
     for (let x = 0; x < width; x++) {
@@ -88,8 +120,7 @@ export class TerrainView {
       }
     }
 
-    // Optional surface highlight: a 2px brighter line along the terrain top edge
-    // so the ground silhouette reads even where body/field contrast is subtle.
+    // 2px brighter surface line along the terrain top edge.
     g.fillStyle(TerrainView.SURFACE_HL, 1);
     for (let x = 0; x < width; x++) {
       if (tops[x] >= 0) {
@@ -97,48 +128,10 @@ export class TerrainView {
       }
     }
 
+    dt.clear();
     dt.draw(g, 0, 0);
     dt.render(); // Phaser 4 explicit flush (Pitfall 3).
     g.destroy();
-
-    // Reusable 1px-radius white circle for erasing craters; scaled to the
-    // carve radius at erase time (a white source erases via dt.erase).
-    if (!scene.textures.exists(TerrainView.ERASE_KEY)) {
-      const cg = scene.add.graphics();
-      cg.fillStyle(0xffffff, 1);
-      cg.fillCircle(1, 1, 1);
-      cg.generateTexture(TerrainView.ERASE_KEY, 2, 2);
-      cg.destroy();
-    }
-
-    // Add the texture to the scene at the world origin.
-    const image = scene.add.image(0, 0, TerrainView.TEXTURE_KEY).setOrigin(0, 0);
-
-    return new TerrainView(scene, dt, image);
-  }
-
-  /**
-   * Erase craters out of the cosmetic layer to mirror the mask carves (PLAY,
-   * called in plan 04 after a shot resolves). Each Carve is integer center +
-   * radius; we scale the 2px erase sprite so its radius matches `c.r`, erase at
-   * the carve center, then flush once after the whole batch (Pitfall 3).
-   */
-  applyCarves(carves: Carve[]): void {
-    if (carves.length === 0) return;
-
-    const eraser = this.scene.add.image(0, 0, TerrainView.ERASE_KEY);
-    eraser.setOrigin(0.5, 0.5);
-    eraser.setVisible(false);
-
-    for (const c of carves) {
-      // The erase source is 2px wide (1px radius); scale to a 2*r diameter.
-      eraser.setScale(c.r);
-      eraser.setPosition(c.cx, c.cy);
-      this.dt.erase(eraser, c.cx, c.cy);
-    }
-
-    this.dt.render(); // single flush after the batch.
-    eraser.destroy();
   }
 
   /**

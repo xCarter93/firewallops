@@ -318,8 +318,10 @@ export class MatchScene extends Phaser.Scene {
 
       const impact = result.impact ?? result.path[result.path.length - 1] ?? null;
 
-      // Carve the visual terrain (the mask was already carved inside applyShot).
-      this.terrain.applyCarves(result.carves);
+      // Repaint the visual terrain from the (already-carved) mask so craters
+      // mirror the authoritative holes. `applyShot` carved this.mask in place
+      // (same TerrainMask instance the controller holds), so this re-mirrors it.
+      this.terrain.repaintFromMask(this.mask);
 
       if (impact) {
         this.fx.explode(impact, blastRadius);
