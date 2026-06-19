@@ -187,11 +187,35 @@ export class MatchScene extends Phaser.Scene {
       this.game.canvas.removeEventListener("contextmenu", onContextMenu),
     );
 
+    // RESPONSIVE VIEWPORT (Scale.RESIZE): the canvas fills the window and the
+    // final viewport height settles AFTER this scene builds, and again whenever
+    // the user resizes the window. Re-pin the cameras + HUD and re-frame so the
+    // bottom bar tracks the true window bottom (otherwise it clips / floats).
+    this.scale.on(Phaser.Scale.Events.RESIZE, this.onResize, this);
+    this.events.once(Phaser.Scenes.Events.SHUTDOWN, () =>
+      this.scale.off(Phaser.Scale.Events.RESIZE, this.onResize, this),
+    );
+
     // INITIAL FRAMING (concern #4): frame the active mech ABOVE the bottom bar
     // on match start — without this the camera opens at scroll (0,0) on the
     // world's top-left quadrant. Instant (animate: false) for the opening frame.
     this.frameOnMech(this.activeMech(), false);
     this.manualPan = false;
+  }
+
+  /**
+   * Scale RESIZE handler: re-size the cameras to the new viewport, reflow the
+   * HUD to the new window bottom, and re-frame the active mech. Guarded so a
+   * RESIZE that fires before the match is fully built is a no-op.
+   */
+  private onResize(gameSize: Phaser.Structs.Size): void {
+    if (!this.hud) return;
+    this.cameras.resize(gameSize.width, gameSize.height);
+    this.hud.resize(gameSize.width, gameSize.height);
+    if (this.phase !== "OVER") {
+      this.frameOnMech(this.activeMech(), false);
+      this.manualPan = false;
+    }
   }
 
   /**

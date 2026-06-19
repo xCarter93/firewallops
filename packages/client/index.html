@@ -20,11 +20,21 @@
       html,
       body {
         margin: 0;
+        height: 100%;
+        /* The canvas fills the viewport (Scale.RESIZE); hide overflow so a
+           canvas descender gap / sub-pixel rounding can never make the page
+           scrollable and push the bottom HUD bar below the fold. */
+        overflow: hidden;
         background: #0f172a;
       }
       #game-container {
         width: 100vw;
         height: 100vh;
+      }
+      /* A canvas is display:inline by default and sits on the text baseline,
+         leaving a few px of descender space beneath it — block removes it. */
+      #game-container canvas {
+        display: block;
       }
     </style>
   </head>

@@ -20,6 +20,12 @@ import type { ShotId } from "../match/loadout.js";
  * shapes (ui-ux-pro-max no-emoji rule). Color is never the only signal: the
  * selected shot shows its glyph, the next player gets a position + NEXT marker.
  *
+ * Responsive (canvas fills the window, game-config Scale.RESIZE): all layout is
+ * computed in `layout()` from the LIVE viewport (`this.w`/`this.h`). The
+ * constructor creates the objects then calls `layout()`; MatchScene calls
+ * `resize(w, h)` on the Scale RESIZE event so the bar re-pins to the new window
+ * bottom instead of being clipped / floating.
+ *
  * Palette (UI-SPEC): field `#0F172A`, surface `#1E293B`/`#334155`, text
  * `#F8FAFC`, cyan `#22D3EE` (reserved: selected-chip border, power fill, MOVE
  * fill, turn highlight + NEXT marker), status green `#22C55E`, threat red
@@ -28,7 +34,8 @@ import type { ShotId } from "../match/loadout.js";
  *
  * PUBLIC CONTRACT (held identical so MatchScene needs no Hud-call edit): the
  * constructor `(scene, playerIds)`, and `flash` / `clearIntro` / `showWinBanner`
- * / `reset`. `update(...)` only GAINS an optional 5th `power?` param.
+ * / `reset`. `update(...)` GAINS an optional 5th `power?` param; `resize(w, h)`
+ * is a new viewport hook.
  *
  * Pure view: imports match TYPES + constants only, never a sim outcome function
  * (ESLint seam guard on view/**).
@@ -61,6 +68,7 @@ const POWER_H = 20;
 const SCORE_W = 120; // score-stub slot 120x56
 const SCORE_H = 56;
 
+const TURN_W = 120; // turn-list column width
 const TURN_ROW_H = 28; // turn-list row height
 const TURN_INSET = 4; // xs
 
@@ -89,6 +97,21 @@ const NUM_SM_STYLE = {
   fontSize: "16px",
   color: TEXT,
 } as const;
+const HEADING_STYLE = {
+  fontFamily: "'Orbitron'",
+  fontSize: "32px",
+  color: TEXT,
+  fontStyle: "700",
+} as const;
+const BANNER_STYLE = {
+  fontFamily: "'Orbitron'",
+  fontSize: "48px",
+  color: TEXT,
+  fontStyle: "700",
+} as const;
+
+const INTRO_BODY =
+  "P1 — set angle, power, fire.  ↑↓ aim · ←→ move · hold SPACE to charge.  ·  RIGHT-DRAG to pan · C to recenter";
 
 /** The three selectable shot chips, in bar order. */
 const CHIP_DEFS: { id: ShotId; glyph: string }[] = [
@@ -98,9 +121,10 @@ const CHIP_DEFS: { id: ShotId; glyph: string }[] = [
 ];
 
 export class Hud {
-  private readonly w: number;
-  private readonly h: number;
-  private readonly barTop: number;
+  // Live viewport (updated by resize()).
+  private w: number;
+  private h: number;
+  private barTop: number;
 
   // Wind (top-center).
   private readonly windLabel: Phaser.GameObjects.Text;
@@ -114,7 +138,7 @@ export class Hud {
   private readonly shotCaption: Phaser.GameObjects.Text;
   private readonly chipG: Phaser.GameObjects.Graphics; // chip borders / fills / TRJ lock
   private readonly chipText: Phaser.GameObjects.Text[] = [];
-  private readonly chipX: number[] = []; // chip left edges (computed once)
+  private readonly chipX: number[] = []; // chip left edges (recomputed in layout)
   private chipY = 0;
 
   // Active-player control zone (SS pips + MOVE budget).
@@ -140,7 +164,7 @@ export class Hud {
   private readonly turnCaption: Phaser.GameObjects.Text;
   private readonly turnG: Phaser.GameObjects.Graphics; // row highlights
   private readonly turnRows: Phaser.GameObjects.Text[] = [];
-  private readonly turnX: number;
+  private turnX = 0;
   private turnRowsTop = 0;
 
   // Pre-match onboarding hint (clears after the first shot).
@@ -166,131 +190,74 @@ export class Hud {
     const cam = scene.cameras.main;
     this.w = cam.width;
     this.h = cam.height;
-    // Pin to the VIEWPORT bottom — cam.height - 96, never the world height
-    // (Pitfall 3). BAR_H is 96; the literal is kept here for the bottom pin.
-    this.barTop = cam.height - 96; // === cam.height - BAR_H
+    this.barTop = this.h - BAR_H;
 
-    // --- WIND (top-center) — UNCHANGED from Phase 2. Stacked in clear rows so
-    // label, arrow and magnitude never overlap. ---
+    // --- WIND (top-center) — UNCHANGED from Phase 2. ---
     this.windLabel = this.lock(
-      scene.add.text(this.w / 2, MARGIN, "WIND", LABEL_STYLE).setOrigin(0.5, 0),
+      scene.add.text(0, 0, "WIND", LABEL_STYLE).setOrigin(0.5, 0),
     );
-    this.windArrow = this.lock(scene.add.graphics()); // drawn at WIND_ARROW_Y
+    this.windArrow = this.lock(scene.add.graphics()); // redrawn each frame at this.w/2
     this.windNum = this.lock(
-      scene.add.text(this.w / 2, WIND_NUM_Y, "0", NUM_STYLE).setOrigin(0.5, 0),
+      scene.add.text(0, 0, "0", NUM_STYLE).setOrigin(0.5, 0),
     );
 
-    // --- BAR CHROME: full-width 96px rect + top divider, pinned to viewport bottom ---
+    // --- BAR CHROME (full-width 96px rect + top divider, drawn in layout) ---
     this.barG = this.lock(scene.add.graphics());
-    this.barG.fillStyle(BAR_FILL, 1);
-    this.barG.fillRect(0, this.barTop, this.w, BAR_H);
-    this.barG.lineStyle(2, SURFACE, 1);
-    this.barG.beginPath();
-    this.barG.moveTo(0, this.barTop);
-    this.barG.lineTo(this.w, this.barTop);
-    this.barG.strokePath();
 
-    const captionY = this.barTop + BAR_PAD; // zone captions sit on the top pad row
-    const rowY = captionY + 20; // widget row below its caption
-
-    // --- SHOT-SELECT zone (left) ---
+    // --- SHOT-SELECT zone ---
     this.shotCaption = this.lock(
-      scene.add.text(EDGE, captionY, "SHOT", LABEL_STYLE).setOrigin(0, 0),
+      scene.add.text(0, 0, "SHOT", LABEL_STYLE).setOrigin(0, 0),
     );
     this.chipG = this.lock(scene.add.graphics());
-    this.chipY = rowY;
-    CHIP_DEFS.forEach((def, i) => {
-      const x = EDGE + i * (CHIP + CHIP_GAP);
-      this.chipX.push(x);
+    CHIP_DEFS.forEach((def) => {
       this.chipText.push(
-        this.lock(
-          scene.add
-            .text(x + CHIP / 2, this.chipY + CHIP / 2, def.glyph, LABEL_SM_STYLE)
-            .setOrigin(0.5),
-        ),
+        this.lock(scene.add.text(0, 0, def.glyph, LABEL_SM_STYLE).setOrigin(0.5)),
       );
     });
 
-    // --- ACTIVE-PLAYER CONTROL zone (SS pips + MOVE), adjacent to shot-select ---
-    this.controlX = EDGE + 3 * (CHIP + CHIP_GAP) + 24;
-    this.pipsY = this.chipY + 10;
-    this.moveBarY = this.chipY + CHIP - MOVE_H;
+    // --- ACTIVE-PLAYER CONTROL zone (SS pips + MOVE) ---
     this.pips = this.lock(scene.add.graphics());
     this.moveCaption = this.lock(
-      scene.add
-        .text(this.controlX, this.moveBarY - 16, "MOVE", LABEL_SM_STYLE)
-        .setOrigin(0, 0),
+      scene.add.text(0, 0, "MOVE", LABEL_SM_STYLE).setOrigin(0, 0),
     );
     this.moveBar = this.lock(scene.add.graphics());
 
-    // --- POWER zone (center-left) ---
-    this.powerX = this.controlX + MOVE_W + 32;
+    // --- POWER zone ---
     this.powerCaption = this.lock(
-      scene.add.text(this.powerX, captionY, "POWER", LABEL_STYLE).setOrigin(0, 0),
+      scene.add.text(0, 0, "POWER", LABEL_STYLE).setOrigin(0, 0),
     );
-    this.powerBarY = rowY;
     this.powerBar = this.lock(scene.add.graphics());
     this.powerNum = this.lock(
-      scene.add
-        .text(this.powerX + POWER_W + 12, this.powerBarY + POWER_H / 2, "0%", NUM_STYLE)
-        .setOrigin(0, 0.5),
+      scene.add.text(0, 0, "0%", NUM_STYLE).setOrigin(0, 0.5),
     );
 
-    // --- SCORE-stub zone (center-right) ---
-    const scoreX = this.powerX + POWER_W + 96;
+    // --- SCORE-stub zone ---
     this.scoreCaption = this.lock(
-      scene.add.text(scoreX, captionY, "SCORE", LABEL_STYLE).setOrigin(0, 0),
+      scene.add.text(0, 0, "SCORE", LABEL_STYLE).setOrigin(0, 0),
     );
     this.scoreValue = this.lock(
-      scene.add
-        .text(scoreX + SCORE_W / 2, rowY + SCORE_H / 2 - 16, "0", NUM_STYLE)
-        .setOrigin(0.5, 0.5),
+      scene.add.text(0, 0, "0", NUM_STYLE).setOrigin(0.5, 0.5),
     );
 
-    // --- TURN list zone (right) ---
-    this.turnX = this.w - EDGE - 120;
+    // --- TURN list zone ---
     this.turnCaption = this.lock(
-      scene.add.text(this.turnX, captionY, "TURN", LABEL_STYLE).setOrigin(0, 0),
+      scene.add.text(0, 0, "TURN", LABEL_STYLE).setOrigin(0, 0),
     );
-    this.turnRowsTop = rowY;
     this.turnG = this.lock(scene.add.graphics());
     // One row per player, sorted live by accumulatedDelay in update(). Pre-create
     // a row text per player so scaling to P3/P4 later is just more entries.
-    playerIds.forEach((_, i) => {
+    playerIds.forEach(() => {
       this.turnRows.push(
-        this.lock(
-          scene.add
-            .text(
-              this.turnX + TURN_INSET + 8,
-              this.turnRowsTop + i * TURN_ROW_H + TURN_ROW_H / 2,
-              "",
-              NUM_SM_STYLE,
-            )
-            .setOrigin(0, 0.5),
-        ),
+        this.lock(scene.add.text(0, 0, "", NUM_SM_STYLE).setOrigin(0, 0.5)),
       );
     });
 
-    // --- Pre-match onboarding hint (intro body appends the pan/recenter keys) ---
+    // --- Pre-match onboarding hint ---
     this.introHeading = this.lock(
-      scene.add
-        .text(this.w / 2, cam.height / 2 - 30, "FIREWALL OPS", {
-          fontFamily: "'Orbitron'",
-          fontSize: "32px",
-          color: TEXT,
-          fontStyle: "700",
-        })
-        .setOrigin(0.5),
+      scene.add.text(0, 0, "FIREWALL OPS", HEADING_STYLE).setOrigin(0.5),
     );
     this.introBody = this.lock(
-      scene.add
-        .text(
-          this.w / 2,
-          cam.height / 2 + 14,
-          "P1 — set angle, power, fire.  ↑↓ aim · ←→ move · hold SPACE to charge.  ·  RIGHT-DRAG to pan · C to recenter",
-          LABEL_STYLE,
-        )
-        .setOrigin(0.5),
+      scene.add.text(0, 0, INTRO_BODY, LABEL_STYLE).setOrigin(0.5),
     );
 
     // --- Transient flash (positioned at a world point, so NOT scroll-locked) ---
@@ -301,28 +268,115 @@ export class Hud {
 
     // --- Win banner (hidden until a winner) ---
     this.banner = this.lock(
-      scene.add
-        .text(this.w / 2, cam.height / 2 - 48, "", {
-          fontFamily: "'Orbitron'",
-          fontSize: "48px",
-          color: TEXT,
-          fontStyle: "700",
-        })
-        .setOrigin(0.5)
-        .setVisible(false),
+      scene.add.text(0, 0, "", BANNER_STYLE).setOrigin(0.5).setVisible(false),
     );
     this.bannerSub = this.lock(
       scene.add
-        .text(this.w / 2, cam.height / 2 + 8, "R to rematch", LABEL_STYLE)
+        .text(0, 0, "R to rematch", LABEL_STYLE)
         .setOrigin(0.5)
         .setVisible(false),
     );
+
+    this.layout();
   }
 
   /** Lock a game object to the camera (HUD overlay does not scroll). */
   private lock<T extends Phaser.GameObjects.Components.ScrollFactor>(obj: T): T {
     obj.setScrollFactor(0);
     return obj;
+  }
+
+  /**
+   * Re-pin the HUD to a new viewport. MatchScene calls this from the Scale
+   * RESIZE event so the bottom bar tracks the live window bottom (the canvas
+   * fills the window via Scale.RESIZE — the viewport height settles AFTER the
+   * Hud is first built, so a one-shot constructor layout would be clipped).
+   */
+  resize(w: number, h: number): void {
+    this.w = w;
+    this.h = h;
+    this.layout();
+  }
+
+  /**
+   * (Re)compute all positions from the live viewport (`this.w`/`this.h`) and
+   * draw the static bar chrome. The per-frame Graphics (chips/pips/move/power/
+   * turn/wind) read the layout fields set here, so they pick up the new geometry
+   * on the next `update()`. Called once from the constructor and on every resize.
+   */
+  private layout(): void {
+    const w = this.w;
+    this.barTop = this.h - BAR_H;
+
+    // Wind (top-center).
+    this.windLabel.setPosition(w / 2, MARGIN);
+    this.windNum.setPosition(w / 2, WIND_NUM_Y);
+
+    // Bar chrome: full-width 96px rect + top divider, pinned to viewport bottom.
+    this.drawBarChrome();
+
+    const captionY = this.barTop + BAR_PAD; // zone captions sit on the top pad row
+    const rowY = captionY + 20; // widget row below its caption
+
+    // Shot-select (left).
+    this.shotCaption.setPosition(EDGE, captionY);
+    this.chipY = rowY;
+    this.chipX.length = 0;
+    CHIP_DEFS.forEach((_, i) => {
+      const x = EDGE + i * (CHIP + CHIP_GAP);
+      this.chipX.push(x);
+      this.chipText[i].setPosition(x + CHIP / 2, this.chipY + CHIP / 2);
+    });
+
+    // Active-player control (SS pips + MOVE), adjacent to shot-select.
+    this.controlX = EDGE + 3 * (CHIP + CHIP_GAP) + 24;
+    this.pipsY = this.chipY + 10;
+    this.moveBarY = this.chipY + CHIP - MOVE_H;
+    this.moveCaption.setPosition(this.controlX, this.moveBarY - 16);
+
+    // Power (center-left).
+    this.powerX = this.controlX + MOVE_W + 32;
+    this.powerCaption.setPosition(this.powerX, captionY);
+    this.powerBarY = rowY;
+    this.powerNum.setPosition(
+      this.powerX + POWER_W + 12,
+      this.powerBarY + POWER_H / 2,
+    );
+
+    // Score-stub (center-right).
+    const scoreX = this.powerX + POWER_W + 96;
+    this.scoreCaption.setPosition(scoreX, captionY);
+    this.scoreValue.setPosition(scoreX + SCORE_W / 2, rowY + SCORE_H / 2 - 16);
+
+    // Turn list (right, edge-anchored).
+    this.turnX = w - EDGE - TURN_W;
+    this.turnCaption.setPosition(this.turnX, captionY);
+    this.turnRowsTop = rowY;
+    this.turnRows.forEach((row, i) => {
+      row.setPosition(
+        this.turnX + TURN_INSET + 8,
+        this.turnRowsTop + i * TURN_ROW_H + TURN_ROW_H / 2,
+      );
+    });
+
+    // Centered overlays.
+    this.introHeading.setPosition(w / 2, this.h / 2 - 30);
+    this.introBody.setPosition(w / 2, this.h / 2 + 14);
+    this.banner.setPosition(w / 2, this.h / 2 - 48);
+    this.bannerSub.setPosition(w / 2, this.h / 2 + 8);
+  }
+
+  /** Static bar chrome: full-width fill + top divider, pinned to viewport bottom. */
+  private drawBarChrome(): void {
+    const g = this.barG;
+    g.clear();
+    g.fillStyle(BAR_FILL, 1);
+    g.fillRect(0, this.barTop, this.w, BAR_H);
+    g.lineStyle(2, SURFACE, 1);
+    g.beginPath();
+    g.moveTo(0, this.barTop);
+    g.lineTo(this.w, this.barTop);
+    g.strokePath();
   }
 
   /**
@@ -495,9 +549,9 @@ export class Hud {
 
       if (isNext) {
         g.fillStyle(CYAN, 0.2);
-        g.fillRect(this.turnX, top, 120, TURN_ROW_H);
+        g.fillRect(this.turnX, top, TURN_W, TURN_ROW_H);
         g.lineStyle(2, CYAN, 1);
-        g.strokeRect(this.turnX, top, 120, TURN_ROW_H);
+        g.strokeRect(this.turnX, top, TURN_W, TURN_ROW_H);
       }
 
       const label = p.id.toUpperCase();
