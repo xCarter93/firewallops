@@ -52,6 +52,12 @@ export class MechView {
     this.barrel.setPosition(x, y);
   }
 
+  /** Tear down both graphics (used on rematch rebuild). */
+  destroy(): void {
+    this.body.destroy();
+    this.barrel.destroy();
+  }
+
   get x(): number {
     return this.body.x;
   }

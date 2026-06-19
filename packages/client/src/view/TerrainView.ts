@@ -24,9 +24,12 @@ export class TerrainView {
   private static readonly BODY = 0x1e293b; // UI-SPEC secondary (terrain body)
   private static readonly ERASE_KEY = "carve-circle";
 
+  private static readonly TEXTURE_KEY = "terrain";
+
   private constructor(
     private readonly scene: Phaser.Scene,
     private readonly dt: Phaser.Textures.DynamicTexture,
+    private readonly image: Phaser.GameObjects.Image,
   ) {}
 
   /** The live DynamicTexture handle (passed to MatchScene via scene data). */
@@ -45,7 +48,13 @@ export class TerrainView {
   static build(scene: Phaser.Scene, mask: TerrainMask): TerrainView {
     const { width, height } = mask;
 
-    const dt = scene.textures.addDynamicTexture("terrain", width, height);
+    // A rematch rebuilds the terrain from a fresh mask; drop any stale texture
+    // under the same key first so addDynamicTexture does not collide.
+    if (scene.textures.exists(TerrainView.TEXTURE_KEY)) {
+      scene.textures.remove(TerrainView.TEXTURE_KEY);
+    }
+
+    const dt = scene.textures.addDynamicTexture(TerrainView.TEXTURE_KEY, width, height);
     if (!dt) {
       throw new Error("TerrainView.build: addDynamicTexture returned null");
     }
@@ -84,9 +93,9 @@ export class TerrainView {
     }
 
     // Add the texture to the scene at the world origin.
-    scene.add.image(0, 0, "terrain").setOrigin(0, 0);
+    const image = scene.add.image(0, 0, TerrainView.TEXTURE_KEY).setOrigin(0, 0);
 
-    return new TerrainView(scene, dt);
+    return new TerrainView(scene, dt, image);
   }
 
   /**
@@ -111,5 +120,14 @@ export class TerrainView {
 
     this.dt.render(); // single flush after the batch.
     eraser.destroy();
+  }
+
+  /**
+   * Tear down the world image (the rematch rebuilds a fresh terrain). The
+   * DynamicTexture itself is removed by the next `build` (which drops any stale
+   * texture under the shared key), so we only destroy the scene image here.
+   */
+  destroy(): void {
+    this.image.destroy();
   }
 }

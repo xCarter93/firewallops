@@ -1,12 +1,24 @@
 import Phaser from "phaser";
+import { TerrainMask } from "@shared/sim";
 import type { Mech } from "@shared/sim";
 import { MatchController } from "../match/MatchController.js";
-import { createInitialState } from "../match/MatchState.js";
+import {
+  createInitialState,
+  GRAVITY,
+  MOVE_BUDGET_PER_TURN,
+} from "../match/MatchState.js";
+import { buildShotInput } from "../match/aim.js";
+import { LOADOUT } from "../match/loadout.js";
 import type { ShotId } from "../match/loadout.js";
 import { MechView } from "../view/MechView.js";
 import { AimView } from "../view/AimView.js";
+import { TerrainView } from "../view/TerrainView.js";
+import { ProjectileView } from "../view/ProjectileView.js";
+import { Fx } from "../view/Fx.js";
+import { Hud } from "../view/Hud.js";
 import type { MatchSceneData } from "./BootScene.js";
 import {
+  MAP,
   P1_ID,
   P2_ID,
   P1_START_X,
@@ -16,19 +28,19 @@ import {
 } from "../world.js";
 
 /**
- * Match scene (Phase 2, plan 03) — PLAY-01 input + PLAY-02 preview.
+ * Match scene (Phase 2, plan 04) — the complete hotseat loop + juice + HUD.
  *
- * Captures ALL aim input (angle, walk, single-sweep power gauge, mouse-drag
- * power, shot select), draws the world (two mechs + the production launch
- * indicator + the dev full-arc overlay). It constructs the MatchController and
- * routes the dev arc through previewTrajectory() — it NEVER calls the sim's
- * outcome functions directly (ESLint seam guard on scenes/**).
+ * Plan 03 captured ALL aim input (angle/walk/power/shot-select) and drew the
+ * world + previews. Plan 04 adds the FIRE flow: releasing Space fires through
+ * THE SEAM (`controller.applyShot`), animates the dot along `result.path` with a
+ * follow-cam, then on impact carves the visual terrain, fires explosion + shake
+ * + floating damage, advances the delay queue, pans to the next mech, rerolls
+ * wind, and ends the match on last-mech-standing with an R rematch.
  *
- * Firing + juice + HUD + win land in plan 04. SEAM FOR PLAN 04: releasing
- * Space currently only LOCKS power (see JustUp handling); plan 04 adds the
- * fire-on-release path there — call controller.applyShot(buildShotInput({...},
- * LOADOUT[selectedShotId]), LOADOUT[selectedShotId]) then advanceTurn() and
- * feed the result to TerrainView.applyCarves + projectile animation.
+ * SEAM INVARIANT (threats T-02-07/T-02-08): this Scene NEVER imports the sim's
+ * outcome functions (resolveShot/simulateTrajectory/quantizeCarve) — it consumes
+ * only the `ShotResult` returned by applyShot. A `firing`/`RESOLVING` gate stops
+ * a turn firing or advancing twice.
  */
 
 // --- Input tuning rates (recorded in the SUMMARY) ---
@@ -38,15 +50,27 @@ const SWEEP_RATE = 70; // power units/s (full 0-100 sweep ~1.4s)
 const MAX_STEP_RISE = 14; // px: surface rise per step that BLOCKS a walk (steep wall)
 const DRAG_SENSITIVITY = 0.5; // power units per px of horizontal drag
 
+// --- Juice / camera timings (recorded in the SUMMARY) ---
+const FOLLOW_LERP = 0.08; // follow-cam smoothing
+const POST_IMPACT_MS = 380; // FX-settle delay before advancing the turn (<=500ms)
+const PAN_MS = 500; // frame-next-mech camera pan (UI-SPEC max)
+const MAX_SHAKE_MS = 300;
+const SHAKE_PER_DAMAGE = 0.0006; // shake amplitude per HP of total damage
+
+type Phase = "AIM" | "RESOLVING" | "OVER";
+
 export class MatchScene extends Phaser.Scene {
   private mask!: MatchSceneData["mask"];
-  /** Cosmetic terrain mirror; plan 04 calls `terrain.applyCarves(result.carves)`. */
   private terrain!: MatchSceneData["terrain"];
   private controller!: MatchController;
   private aimView!: AimView;
+  private fx!: Fx;
+  private hud!: Hud;
 
   private mechViews!: Record<string, MechView>;
   private mechs!: Mech[];
+
+  private phase: Phase = "AIM";
 
   // Live aim state.
   private angleDeg = 45;
@@ -63,6 +87,7 @@ export class MatchScene extends Phaser.Scene {
   private key1!: Phaser.Input.Keyboard.Key;
   private key2!: Phaser.Input.Keyboard.Key;
   private key3!: Phaser.Input.Keyboard.Key;
+  private keyR!: Phaser.Input.Keyboard.Key;
 
   constructor() {
     super("Match");
@@ -71,12 +96,51 @@ export class MatchScene extends Phaser.Scene {
   create(data: MatchSceneData): void {
     this.mask = data.mask;
     this.terrain = data.terrain;
+
+    this.buildMatch();
+
+    this.aimView = new AimView(this);
+    this.fx = new Fx(this);
+    this.hud = new Hud(this, [P1_ID, P2_ID]);
+
+    // Camera: bound to the world (which may exceed the viewport) so follow/pan
+    // stay inside the map.
+    this.cameras.main.setBounds(0, 0, MAP.width, MAP.height);
+
+    // --- Input registration ---
+    const kb = this.input.keyboard;
+    if (!kb) throw new Error("MatchScene requires a keyboard input plugin");
+    this.cursors = kb.createCursorKeys();
+    this.space = kb.addKey(Phaser.Input.Keyboard.KeyCodes.SPACE);
+    this.key1 = kb.addKey(Phaser.Input.Keyboard.KeyCodes.ONE);
+    this.key2 = kb.addKey(Phaser.Input.Keyboard.KeyCodes.TWO);
+    this.key3 = kb.addKey(Phaser.Input.Keyboard.KeyCodes.THREE);
+    this.keyR = kb.addKey(Phaser.Input.Keyboard.KeyCodes.R);
+
+    // Mouse-drag power (precise) on the same 0-100 scale as the gauge.
+    this.input.on("pointerdown", (p: Phaser.Input.Pointer) => {
+      if (this.phase !== "AIM") return;
+      this.dragMode = true;
+      this.dragStartX = p.x;
+      this.dragStartPower = this.power;
+    });
+    this.input.on("pointerup", () => {
+      this.dragMode = false;
+    });
+  }
+
+  /**
+   * Build (or rebuild) the live match state, controller, mech models + views.
+   * Reseats both mechs on the current mask surface and frames P1. Shared by
+   * create() and the R rematch.
+   */
+  private buildMatch(): void {
     const { height } = this.mask;
 
-    // Seat each mech on the procedural surface at its start X (body center sits
-    // half a body above the ground line).
-    const p1y = surfaceY((x, y) => this.mask.isSolid(x, y), P1_START_X, height) - MECH_BODY_H / 2;
-    const p2y = surfaceY((x, y) => this.mask.isSolid(x, y), P2_START_X, height) - MECH_BODY_H / 2;
+    const p1y =
+      surfaceY((x, y) => this.mask.isSolid(x, y), P1_START_X, height) - MECH_BODY_H / 2;
+    const p2y =
+      surfaceY((x, y) => this.mask.isSolid(x, y), P2_START_X, height) - MECH_BODY_H / 2;
 
     this.mechs = [
       { id: P1_ID, x: P1_START_X, y: p1y, hp: 100 },
@@ -87,7 +151,6 @@ export class MatchScene extends Phaser.Scene {
     this.controller = new MatchController(this.mask, state);
     this.controller.rollWind();
 
-    // Mech views; P1 is active first (cyan outline cue).
     this.mechViews = {
       [P1_ID]: new MechView(this, this.mechs[0].x, this.mechs[0].y),
       [P2_ID]: new MechView(this, this.mechs[1].x, this.mechs[1].y),
@@ -96,30 +159,28 @@ export class MatchScene extends Phaser.Scene {
     this.mechViews[P2_ID].setActive(false);
     this.mechViews[P1_ID].setBarrelAngle(this.angleDeg);
 
-    this.aimView = new AimView(this);
-
-    // --- Input registration ---
-    const kb = this.input.keyboard;
-    if (!kb) throw new Error("MatchScene requires a keyboard input plugin");
-    this.cursors = kb.createCursorKeys();
-    this.space = kb.addKey(Phaser.Input.Keyboard.KeyCodes.SPACE);
-    this.key1 = kb.addKey(Phaser.Input.Keyboard.KeyCodes.ONE);
-    this.key2 = kb.addKey(Phaser.Input.Keyboard.KeyCodes.TWO);
-    this.key3 = kb.addKey(Phaser.Input.Keyboard.KeyCodes.THREE);
-
-    // Mouse-drag power (precise) on the same 0-100 scale as the gauge.
-    this.input.on("pointerdown", (p: Phaser.Input.Pointer) => {
-      this.dragMode = true;
-      this.dragStartX = p.x;
-      this.dragStartPower = this.power;
-    });
-    this.input.on("pointerup", () => {
-      this.dragMode = false;
-    });
+    this.phase = "AIM";
+    this.power = 0;
+    this.charging = false;
+    this.selectedShotId = "shot-1";
   }
 
   update(_t: number, dtMs: number): void {
     const dt = dtMs / 1000;
+
+    // Rematch is available at any time the match is OVER.
+    if (this.phase === "OVER") {
+      if (Phaser.Input.Keyboard.JustDown(this.keyR)) this.rematch();
+      this.hud.update(this.controller.state, this.controller, this.selectedShotId, dtMs);
+      return;
+    }
+
+    // While the shot resolves, ignore all aim/move/fire input (threat T-02-08).
+    if (this.phase === "RESOLVING") {
+      this.hud.update(this.controller.state, this.controller, this.selectedShotId, dtMs);
+      return;
+    }
+
     const active = this.activeMech();
     const activeView = this.mechViews[active.id];
 
@@ -136,7 +197,7 @@ export class MatchScene extends Phaser.Scene {
     if (this.cursors.left.isDown) this.tryWalk(active, activeView, -1, dt);
     if (this.cursors.right.isDown) this.tryWalk(active, activeView, 1, dt);
 
-    // --- Power gauge: single-sweep, release-locks (Pattern 3, Pitfall 4) ---
+    // --- Power gauge: single-sweep, release FIRES (Pitfall 4: release-to-fire) ---
     if (Phaser.Input.Keyboard.JustDown(this.space)) {
       this.power = 0;
       this.charging = true;
@@ -145,8 +206,11 @@ export class MatchScene extends Phaser.Scene {
       this.power = Math.min(100, this.power + SWEEP_RATE * dt);
     }
     if (Phaser.Input.Keyboard.JustUp(this.space)) {
-      // LOCK power. (Plan 04 adds fire-on-release here.)
       this.charging = false;
+      if (this.power > 0) {
+        this.fire(active, activeView);
+        return; // entered RESOLVING; skip the rest of this frame.
+      }
     }
 
     // --- Mouse-drag power (precise) ---
@@ -162,7 +226,6 @@ export class MatchScene extends Phaser.Scene {
       if (this.controller.isSSArmed(this.controller.state.activePlayerId)) {
         this.selectedShotId = "trojan";
       }
-      // else: ignore (locked-state HUD copy is plan 04).
     }
 
     // --- Preview render (PLAY-02) ---
@@ -182,6 +245,134 @@ export class MatchScene extends Phaser.Scene {
       gravity: this.controller.state.gravity,
       selectedShotId: this.selectedShotId,
     });
+
+    this.hud.update(this.controller.state, this.controller, this.selectedShotId, dtMs);
+  }
+
+  /**
+   * Fire the current shot through THE SEAM, animate it, and chain the impact +
+   * turn-advance. Enters RESOLVING so the turn cannot fire/advance twice.
+   */
+  private fire(active: Mech, activeView: MechView): void {
+    this.phase = "RESOLVING";
+    this.hud.clearIntro();
+
+    const def = LOADOUT[this.selectedShotId];
+
+    // Launch from the barrel TIP so the dot leaves the muzzle.
+    const muzzle = activeView.getMuzzle();
+    const aim = buildShotInput({
+      mech: active,
+      angleDeg: this.angleDeg,
+      power: this.power,
+      wind: this.controller.state.wind,
+      gravity: GRAVITY,
+      def,
+    });
+    aim.x = muzzle.x;
+    aim.y = muzzle.y;
+
+    // THE SEAM CALL — the only outcome-producing path (Phase 3 swap point).
+    const result = this.controller.applyShot(aim, def);
+
+    const totalDamage = result.damage.reduce((s, d) => s + d.amount, 0);
+    const blastRadius = def.blastRadius;
+
+    const projectile = new ProjectileView(this);
+    const cam = this.cameras.main;
+    cam.startFollow(projectile.sprite, false, FOLLOW_LERP, FOLLOW_LERP);
+
+    projectile.animateAlong(result.path, () => {
+      cam.stopFollow();
+
+      const impact = result.impact ?? result.path[result.path.length - 1] ?? null;
+
+      // Carve the visual terrain (the mask was already carved inside applyShot).
+      this.terrain.applyCarves(result.carves);
+
+      if (impact) {
+        this.fx.explode(impact, blastRadius);
+        const intensity = Math.min(0.02, totalDamage * SHAKE_PER_DAMAGE);
+        this.fx.shake(MAX_SHAKE_MS, intensity);
+      }
+
+      // Floating damage numbers at each damaged mech's position.
+      this.fx.floatDamage(result.damage, (mechId) => {
+        const m = this.mechs.find((mm) => mm.id === mechId);
+        return m ? { x: m.x, y: m.y } : null;
+      });
+
+      // After the FX settle, advance the turn and frame the next mech.
+      this.time.delayedCall(POST_IMPACT_MS, () => this.afterImpact());
+    });
+  }
+
+  /** Advance the delay queue, reroll wind, frame the next mech, check the win. */
+  private afterImpact(): void {
+    const winnerId = this.controller.checkWin();
+    if (winnerId) {
+      this.endMatch(winnerId);
+      return;
+    }
+
+    this.controller.advanceTurn();
+
+    const nextId = this.controller.state.activePlayerId;
+    // Refresh active outlines (cyan moves to the new active mech).
+    for (const id of [P1_ID, P2_ID]) {
+      this.mechViews[id].setActive(id === nextId);
+    }
+
+    // Reset the new active player's per-turn move budget + roll fresh wind.
+    const nextPlayer = this.controller.state.players.find((p) => p.id === nextId);
+    if (nextPlayer) nextPlayer.moveBudget = MOVE_BUDGET_PER_TURN;
+    this.controller.rollWind();
+
+    // Frame the next active mech.
+    const nextMech = this.mechs.find((m) => m.id === nextId);
+    if (nextMech) {
+      this.cameras.main.pan(nextMech.x, nextMech.y, PAN_MS, "Quad.easeInOut");
+    }
+
+    // Reset aim for the next turn and re-enable input.
+    this.power = 0;
+    this.charging = false;
+    this.selectedShotId = "shot-1";
+    this.phase = "AIM";
+  }
+
+  /** Last-mech-standing (PLAY-07): freeze input + show the win banner. */
+  private endMatch(winnerId: string): void {
+    this.phase = "OVER";
+    for (const id of [P1_ID, P2_ID]) this.mechViews[id].setActive(false);
+    this.hud.showWinBanner(winnerId.toUpperCase());
+  }
+
+  /**
+   * R rematch (PLAY-07, non-destructive): rebuild a FRESH uncarved mask + the
+   * cosmetic terrain texture, rebuild the match state/controller, reset both
+   * mechs to 100 HP at their start positions, reset the HUD, and re-center P1.
+   */
+  private rematch(): void {
+    // Tear down old world views so the rebuild starts clean.
+    for (const id of [P1_ID, P2_ID]) {
+      this.mechViews[id].destroy();
+    }
+    this.terrain.destroy();
+
+    // Fresh, uncarved authority + cosmetic mirror.
+    this.mask = TerrainMask.fromMap(MAP);
+    this.terrain = TerrainView.build(this, this.mask);
+
+    this.buildMatch();
+    this.hud.reset();
+
+    this.angleDeg = 45;
+    this.mechViews[P1_ID].setBarrelAngle(this.angleDeg);
+
+    const p1 = this.mechs[0];
+    this.cameras.main.stopFollow();
+    this.cameras.main.centerOn(p1.x, p1.y);
   }
 
   /**
@@ -190,14 +381,13 @@ export class MatchScene extends Phaser.Scene {
    * (the "steep wall" rule, client-side, no sim change). Decrements moveBudget
    * by the distance actually walked; clamps when the budget is spent.
    */
-  private tryWalk(
-    mech: Mech,
-    view: MechView,
-    dir: -1 | 1,
-    dt: number,
-  ): void {
+  private tryWalk(mech: Mech, view: MechView, dir: -1 | 1, dt: number): void {
     const player = this.controller.state.players.find((p) => p.id === mech.id);
-    if (!player || player.moveBudget <= 0) return;
+    if (!player) return;
+    if (player.moveBudget <= 0) {
+      this.hud.flash("OUT OF MOVE BUDGET", { x: mech.x, y: mech.y });
+      return;
+    }
 
     const step = Math.min(WALK_SPEED * dt, player.moveBudget);
     const candidateX = mech.x + dir * step;
@@ -216,7 +406,10 @@ export class MatchScene extends Phaser.Scene {
 
     // Surface rise = ground getting HIGHER (smaller y, y-down). Block steep walls.
     const rise = currentSurface - candidateSurface;
-    if (rise > MAX_STEP_RISE) return; // BLOCKED.
+    if (rise > MAX_STEP_RISE) {
+      this.hud.flash("BLOCKED", { x: mech.x, y: mech.y });
+      return;
+    }
 
     mech.x = candidateX;
     mech.y = candidateSurface - MECH_BODY_H / 2;
