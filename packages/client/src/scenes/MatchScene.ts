@@ -323,6 +323,10 @@ export class MatchScene extends Phaser.Scene {
       // (same TerrainMask instance the controller holds), so this re-mirrors it.
       this.terrain.repaintFromMask(this.mask);
 
+      // Destructible-terrain settle: any mech whose ground was carved out falls
+      // to the new surface.
+      this.settleMechs();
+
       if (impact) {
         this.fx.explode(impact, blastRadius);
         const intensity = Math.min(0.02, totalDamage * SHAKE_PER_DAMAGE);
@@ -452,6 +456,38 @@ export class MatchScene extends Phaser.Scene {
     mech.y = candidateSurface - MECH_BODY_H / 2;
     view.setPosition(mech.x, mech.y);
     player.moveBudget = Math.max(0, player.moveBudget - step);
+  }
+
+  /**
+   * Destructible-terrain settle (02-04 fun-gate): after a shot carves the mask,
+   * any mech whose ground dropped out falls to the new surface. The mech MODEL y
+   * updates immediately (so the next turn's launch/collision is correct) while
+   * the VIEW tweens down. Carving only removes ground, so mechs only ever fall.
+   * Phase 3 makes this server-authoritative; for the local hotseat the Scene
+   * owns it (consistent with tryWalk's surface re-seating).
+   */
+  private settleMechs(): void {
+    for (const mech of this.mechs) {
+      const surface = surfaceY(
+        (x, y) => this.mask.isSolid(x, y),
+        Math.round(mech.x),
+        this.mask.height,
+      );
+      const settledY = surface - MECH_BODY_H / 2;
+      if (settledY > mech.y + 0.5) {
+        const view = this.mechViews[mech.id];
+        const fromY = mech.y;
+        mech.y = settledY;
+        const proxy = { y: fromY };
+        this.tweens.add({
+          targets: proxy,
+          y: settledY,
+          duration: Phaser.Math.Clamp((settledY - fromY) * 6, 150, 600),
+          ease: "Quad.easeIn",
+          onUpdate: () => view.setPosition(mech.x, proxy.y),
+        });
+      }
+    }
   }
 
   private activeMech(): Mech {
