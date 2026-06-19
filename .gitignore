@@ -1,2 +1,9 @@
 # GSD planning docs — kept local-only (commit_docs: false)
 .planning/
+.claude/
+
+# Node / build artifacts
+node_modules/
+dist/
+coverage/
+*.tsbuildinfo
