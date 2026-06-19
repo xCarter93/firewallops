@@ -4,6 +4,12 @@ import tseslint from "typescript-eslint";
 // network-free, and DOM-free. These bans are enforced at lint time so the
 // boundary is structural, not a matter of discipline.
 export default tseslint.config(
+  // Global ignores: never lint build output, deps, or repo tooling. Without
+  // this, `eslint .` walks packages/client/dist (minified phaser bundle) and
+  // .claude/hooks (vendored GSD harness scripts) and floods with errors.
+  {
+    ignores: ["**/dist/**", "**/node_modules/**", ".claude/**"],
+  },
   ...tseslint.configs.recommended,
   {
     files: ["packages/shared/**/*.ts"],
@@ -47,6 +53,67 @@ export default tseslint.config(
           argsIgnorePattern: "^_",
           varsIgnorePattern: "^_",
           caughtErrorsIgnorePattern: "^_",
+        },
+      ],
+    },
+  },
+  // Seam purity gate (mirrors the SIM-04 shared gate): src/match/** is the
+  // headless seam — the Phase 3 swap point — and MUST stay phaser-free so the
+  // MatchController/loadout logic is testable in bare Node.
+  {
+    files: ["packages/client/src/match/**/*.ts"],
+    rules: {
+      "no-restricted-imports": [
+        "error",
+        {
+          paths: [
+            {
+              name: "phaser",
+              message:
+                "src/match/** is the headless seam (Phase 3 swap point) — no phaser imports here.",
+            },
+          ],
+          patterns: ["phaser/*"],
+        },
+      ],
+      "@typescript-eslint/no-unused-vars": [
+        "error",
+        {
+          argsIgnorePattern: "^_",
+          varsIgnorePattern: "^_",
+          caughtErrorsIgnorePattern: "^_",
+        },
+      ],
+    },
+  },
+  // Seam-DIRECTION guard (mechanical enforcement of the single seam, threats
+  // T-02-04/T-02-07): Scenes and views MUST route outcome sim through
+  // MatchController.applyShot()/previewTrajectory(), never call the sim's
+  // outcome functions directly. Ban ONLY the three named outcome imports —
+  // TerrainMask/MapDef (BootScene mask build), Carve/Damage, and all type-only
+  // imports stay allowed. A broad name ban WITHOUT importNames would break the
+  // legitimate mask build, so do not widen this.
+  {
+    files: [
+      "packages/client/src/scenes/**/*.ts",
+      "packages/client/src/view/**/*.ts",
+    ],
+    rules: {
+      "no-restricted-imports": [
+        "error",
+        {
+          paths: [
+            {
+              name: "@shared/sim",
+              importNames: [
+                "resolveShot",
+                "simulateTrajectory",
+                "quantizeCarve",
+              ],
+              message:
+                "Scenes/views must go through MatchController.applyShot()/previewTrajectory() — the Phase 3 seam. Outcome sim calls live only in src/match/**.",
+            },
+          ],
         },
       ],
     },
