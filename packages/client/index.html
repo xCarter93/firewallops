@@ -4,6 +4,18 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>FirewallOps</title>
+    <!--
+      Web fonts (UI-SPEC "Tech/HUD Mono" pairing): Share Tech Mono + Fira Code,
+      with Orbitron reserved for the win banner. Zero-dependency CSS-link path
+      (RESEARCH A3) — BootScene awaits `document.fonts.ready` before handoff so
+      the first canvas frame renders in the correct family (no FOUT, Pitfall 5).
+    -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Fira+Code:wght@400;500&family=Orbitron:wght@700&display=swap"
+      rel="stylesheet"
+    />
     <style>
       html,
       body {
