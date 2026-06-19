@@ -33,7 +33,10 @@ export const SHOT_1: ProjectileDef = {
   grazeFloor: 5,
   directHitThreshold: 6,
   directHitBonus: 18,
-  powerScale: 1,
+  // Tuning pass (02-04 NO-GO fix 3): base 2.4 × 2 → ~480px/s launch so a full-
+  // power shot comfortably crosses the ~720px gap on the 1024-wide map. ~4px/step
+  // at the sim's dt=1/120 — still tunneling-safe against solid ground.
+  powerScale: 2,
   mass: 1,
   drag: 0,
   turnDelay: 10,
@@ -51,7 +54,8 @@ export const SHOT_2: ProjectileDef = {
   grazeFloor: 3,
   directHitThreshold: 6,
   directHitBonus: 8,
-  powerScale: 1,
+  // Tuning pass (02-04 NO-GO fix 3): ~2× launch velocity to cross the map gap.
+  powerScale: 2,
   mass: 1,
   drag: 0,
   spread: 16,
@@ -68,7 +72,8 @@ export const TROJAN: ProjectileDef = {
   grazeFloor: 8,
   directHitThreshold: 8,
   directHitBonus: 14,
-  powerScale: 1,
+  // Tuning pass (02-04 NO-GO fix 3): ~2× launch velocity to cross the map gap.
+  powerScale: 2,
   mass: 1,
   drag: 0,
   turnDelay: 40,

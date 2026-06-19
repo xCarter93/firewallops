@@ -28,6 +28,15 @@ export interface PlayerState {
   ssHitCharge: number;
   /** Remaining horizontal move budget this turn. */
   moveBudget: number;
+  /**
+   * Aim facing (02-04 NO-GO fix 2): +1 = facing right (aim 0=right…90=up),
+   * -1 = facing left (aim mirrored to 180=left…90=up). Client-only turn state —
+   * NOT a `@shared/sim` Mech field (that type is frozen). The on-screen aim
+   * angle stays 0–90 relative to this; `buildShotInput` converts it to the sim's
+   * absolute angle. Initial facing points toward the opponent / map center;
+   * pressing ←/→ flips it so a player can aim the way they last moved.
+   */
+  facing: 1 | -1;
 }
 
 /** The whole local match. `mechs` is the array `resolveShot` damages. */
@@ -42,10 +51,15 @@ export interface MatchState {
 /**
  * Build the opening state: P1 (players[0]) active, all delay/charge zeroed and
  * move budget full, wind 0 (rolled at the first turn start), default gravity.
+ *
+ * Each player may declare an initial `facing` (02-04 NO-GO fix 2); it defaults
+ * to +1 (facing right) when omitted so headless callers that don't care keep
+ * working. The Scene passes P1 → +1 (faces right, toward center) and P2 → -1
+ * (faces left, toward center).
  */
 export function createInitialState(
   mechs: Mech[],
-  players: { id: string }[],
+  players: { id: string; facing?: 1 | -1 }[],
 ): MatchState {
   if (players.length === 0) {
     throw new Error("createInitialState requires at least one player");
@@ -57,6 +71,7 @@ export function createInitialState(
       accumulatedDelay: 0,
       ssHitCharge: 0,
       moveBudget: MOVE_BUDGET_PER_TURN,
+      facing: p.facing ?? 1,
     })),
     wind: 0,
     gravity: GRAVITY,

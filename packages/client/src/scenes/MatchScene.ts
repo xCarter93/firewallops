@@ -7,6 +7,7 @@ import {
   GRAVITY,
   MOVE_BUDGET_PER_TURN,
 } from "../match/MatchState.js";
+import type { PlayerState } from "../match/MatchState.js";
 import { buildShotInput } from "../match/aim.js";
 import { LOADOUT } from "../match/loadout.js";
 import type { ShotId } from "../match/loadout.js";
@@ -147,7 +148,13 @@ export class MatchScene extends Phaser.Scene {
       { id: P2_ID, x: P2_START_X, y: p2y, hp: 100 },
     ];
 
-    const state = createInitialState(this.mechs, [{ id: P1_ID }, { id: P2_ID }]);
+    // Facing (02-04 NO-GO fix 2): initial facing points toward the opponent /
+    // map center — P1 (left) faces right (+1), P2 (right) faces left (-1) — so
+    // P2 can aim left at P1 from the very first turn.
+    const state = createInitialState(this.mechs, [
+      { id: P1_ID, facing: 1 },
+      { id: P2_ID, facing: -1 },
+    ]);
     this.controller = new MatchController(this.mask, state);
     this.controller.rollWind();
 
@@ -157,7 +164,11 @@ export class MatchScene extends Phaser.Scene {
     };
     this.mechViews[P1_ID].setActive(true);
     this.mechViews[P2_ID].setActive(false);
-    this.mechViews[P1_ID].setBarrelAngle(this.angleDeg);
+    this.mechViews[P1_ID].setFacing(1);
+    this.mechViews[P2_ID].setFacing(-1);
+    // Barrel uses the ABSOLUTE angle (relative angle through the active facing).
+    this.mechViews[P1_ID].setBarrelAngle(this.absoluteAngle(1));
+    this.mechViews[P2_ID].setBarrelAngle(this.absoluteAngle(-1));
 
     this.phase = "AIM";
     this.power = 0;
@@ -183,19 +194,30 @@ export class MatchScene extends Phaser.Scene {
 
     const active = this.activeMech();
     const activeView = this.mechViews[active.id];
+    const activePlayer = this.activePlayerState();
 
-    // --- Angle (PLAY-01): clamp 0-90 ---
+    // --- Angle (PLAY-01): the on-screen aim stays 0-90 RELATIVE to facing ---
     if (this.cursors.up.isDown) {
       this.angleDeg = Math.min(90, this.angleDeg + ANGLE_RATE * dt);
     }
     if (this.cursors.down.isDown) {
       this.angleDeg = Math.max(0, this.angleDeg - ANGLE_RATE * dt);
     }
-    activeView.setBarrelAngle(this.angleDeg);
 
-    // --- Move (budget-limited walk, blocked by steep walls) ---
-    if (this.cursors.left.isDown) this.tryWalk(active, activeView, -1, dt);
-    if (this.cursors.right.isDown) this.tryWalk(active, activeView, 1, dt);
+    // --- Move (budget-limited walk, blocked by steep walls). Pressing a
+    // direction also FACES that way (02-04 NO-GO fix 2) so "move left → aim
+    // left", independent of whether the walk itself is allowed. ---
+    if (this.cursors.left.isDown) {
+      this.setActiveFacing(activePlayer, activeView, -1);
+      this.tryWalk(active, activeView, -1, dt);
+    }
+    if (this.cursors.right.isDown) {
+      this.setActiveFacing(activePlayer, activeView, 1);
+      this.tryWalk(active, activeView, 1, dt);
+    }
+
+    // Barrel points along the ABSOLUTE angle (relative aim × current facing).
+    activeView.setBarrelAngle(this.absoluteAngle(activePlayer.facing));
 
     // --- Power gauge: single-sweep, release FIRES (Pitfall 4: release-to-fire) ---
     if (Phaser.Input.Keyboard.JustDown(this.space)) {
@@ -228,18 +250,20 @@ export class MatchScene extends Phaser.Scene {
       }
     }
 
-    // --- Preview render (PLAY-02) ---
+    // --- Preview render (PLAY-02). Indicator + dev arc consume the ABSOLUTE
+    // angle so the preview, launch line, barrel, and fired shot all agree. ---
+    const absAngle = this.absoluteAngle(activePlayer.facing);
     const muzzle = activeView.getMuzzle();
     this.aimView.drawLaunchIndicator(
       muzzle,
-      this.angleDeg,
+      absAngle,
       this.power,
       this.controller.state.wind,
     );
     this.aimView.drawDevArc({
       controller: this.controller,
       mech: active,
-      angleDeg: this.angleDeg,
+      angleDeg: absAngle,
       power: this.power,
       wind: this.controller.state.wind,
       gravity: this.controller.state.gravity,
@@ -259,7 +283,9 @@ export class MatchScene extends Phaser.Scene {
 
     const def = LOADOUT[this.selectedShotId];
 
-    // Launch from the barrel TIP so the dot leaves the muzzle.
+    // Launch from the barrel TIP so the dot leaves the muzzle. The relative aim
+    // angle is converted to the sim's ABSOLUTE angle through the active player's
+    // facing (02-04 NO-GO fix 2), so the fired arc matches the previewed barrel.
     const muzzle = activeView.getMuzzle();
     const aim = buildShotInput({
       mech: active,
@@ -268,6 +294,7 @@ export class MatchScene extends Phaser.Scene {
       wind: this.controller.state.wind,
       gravity: GRAVITY,
       def,
+      facing: this.activePlayerState().facing,
     });
     aim.x = muzzle.x;
     aim.y = muzzle.y;
@@ -323,6 +350,12 @@ export class MatchScene extends Phaser.Scene {
       this.mechViews[id].setActive(id === nextId);
     }
 
+    // Point the new active mech's barrel along ITS facing (02-04 NO-GO fix 2).
+    const nextPlayerState = this.controller.state.players.find((p) => p.id === nextId);
+    if (nextPlayerState) {
+      this.mechViews[nextId].setBarrelAngle(this.absoluteAngle(nextPlayerState.facing));
+    }
+
     // Reset the new active player's per-turn move budget + roll fresh wind.
     const nextPlayer = this.controller.state.players.find((p) => p.id === nextId);
     if (nextPlayer) nextPlayer.moveBudget = MOVE_BUDGET_PER_TURN;
@@ -364,11 +397,9 @@ export class MatchScene extends Phaser.Scene {
     this.mask = TerrainMask.fromMap(MAP);
     this.terrain = TerrainView.build(this, this.mask);
 
+    this.angleDeg = 45;
     this.buildMatch();
     this.hud.reset();
-
-    this.angleDeg = 45;
-    this.mechViews[P1_ID].setBarrelAngle(this.angleDeg);
 
     const p1 = this.mechs[0];
     this.cameras.main.stopFollow();
@@ -422,5 +453,34 @@ export class MatchScene extends Phaser.Scene {
     const m = this.mechs.find((mech) => mech.id === id);
     if (!m) throw new Error(`active mech ${id} not found`);
     return m;
+  }
+
+  /** The active player's turn-economy state (holds the aim `facing`). */
+  private activePlayerState(): PlayerState {
+    const id = this.controller.state.activePlayerId;
+    const p = this.controller.state.players.find((pl) => pl.id === id);
+    if (!p) throw new Error(`active player ${id} not found`);
+    return p;
+  }
+
+  /**
+   * Convert the on-screen 0–90 relative aim into the sim's absolute angle for a
+   * given facing (mirror of buildShotInput's rule): facing +1 → angle;
+   * facing -1 → 180 - angle. Used for the barrel + preview so they match the
+   * fired shot exactly.
+   */
+  private absoluteAngle(facing: 1 | -1): number {
+    return facing === 1 ? this.angleDeg : 180 - this.angleDeg;
+  }
+
+  /** Set the active player's facing (on ←/→) and flip the chassis to match. */
+  private setActiveFacing(
+    player: PlayerState,
+    view: MechView,
+    facing: 1 | -1,
+  ): void {
+    if (player.facing === facing) return;
+    player.facing = facing;
+    view.setFacing(facing);
   }
 }

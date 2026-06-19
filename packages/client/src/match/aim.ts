@@ -8,6 +8,14 @@ import type { Mech, ProjectileDef, ShotInput } from "@shared/sim";
  * (gauge angle/power, current wind, selected def); this function just shapes
  * them into the sim's ShotInput, taking the launch position from the firing
  * mech. No phaser, no side effects.
+ *
+ * FACING (02-04 NO-GO fix 2): the on-screen aim stays in the 0–90 band
+ * (relative-to-facing), but the sim's angle convention is ABSOLUTE
+ * (0=right…90=up…180=left, y-down). `facing` converts the relative angle into
+ * the absolute sim angle so a player on the right (facing -1) can aim LEFT at an
+ * opponent. `facing: 1` (right, default) leaves the angle unchanged so the
+ * existing PLAY-01 test still passes; `facing: -1` (left) mirrors it across the
+ * vertical: `absoluteDeg = 180 - relativeAngle` (e.g. 30 → 150, 90 → 90).
  */
 export function buildShotInput(args: {
   mech: Mech;
@@ -16,11 +24,14 @@ export function buildShotInput(args: {
   wind: number;
   gravity: number;
   def: ProjectileDef;
+  facing?: 1 | -1;
 }): ShotInput {
+  const facing = args.facing ?? 1;
+  const absoluteDeg = facing === 1 ? args.angleDeg : 180 - args.angleDeg;
   return {
     x: args.mech.x,
     y: args.mech.y,
-    angleDeg: args.angleDeg,
+    angleDeg: absoluteDeg,
     power: args.power,
     wind: args.wind,
     gravity: args.gravity,

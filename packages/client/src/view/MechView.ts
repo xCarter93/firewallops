@@ -12,6 +12,13 @@ import { MECH_BODY_W, MECH_BODY_H } from "../world.js";
  * COORDINATE NOTE (RESEARCH anti-pattern — do NOT double-negate): the sim
  * already encodes y-down (angle 0=right, 90=up; it negates sin internally).
  * So "up = negative rotation" is the SINGLE negation: `DegToRad(-angleDeg)`.
+ *
+ * FACING (02-04 NO-GO fix 2): `setBarrelAngle` now takes the ABSOLUTE sim angle
+ * (0=right…90=up…180=left), so the same negate-for-y-down rule covers the full
+ * range and the barrel points the way the shot will actually fly. `setFacing`
+ * flips only the CHASSIS body (`setScale(facing,1)`) for the visual orientation
+ * cue; the barrel direction is owned entirely by the absolute angle (flipping
+ * the barrel too would double-mirror it).
  */
 export class MechView {
   private readonly body: Phaser.GameObjects.Rectangle;
@@ -32,9 +39,18 @@ export class MechView {
       .setOrigin(0, 0.5);
   }
 
-  /** Rotate the barrel to `angleDeg` (0-90). Single negation for y-down. */
-  setBarrelAngle(angleDeg: number): void {
-    this.barrel.setRotation(Phaser.Math.DegToRad(-angleDeg));
+  /**
+   * Rotate the barrel to the ABSOLUTE sim angle (0=right…90=up…180=left). The
+   * single y-down negation covers the whole 0–180 range, so a facing-left shot
+   * (e.g. absolute 150°) points the barrel up-and-left, matching the arc.
+   */
+  setBarrelAngle(absoluteAngleDeg: number): void {
+    this.barrel.setRotation(Phaser.Math.DegToRad(-absoluteAngleDeg));
+  }
+
+  /** Flip the chassis to face left (-1) or right (+1) — visual cue only. */
+  setFacing(facing: 1 | -1): void {
+    this.body.setScale(facing, 1);
   }
 
   /** Toggle the cyan "you control this" outline (UI-SPEC reserved cyan #1). */

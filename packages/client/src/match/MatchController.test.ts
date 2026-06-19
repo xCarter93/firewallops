@@ -73,6 +73,26 @@ describe("MatchController seam", () => {
     expect(input.projectile).toBe(SHOT_1);
   });
 
+  it("PLAY-01 facing: facing -1 mirrors the relative angle to 180 - angle; facing 1 is unchanged", () => {
+    const mech = firingMech("p1");
+    const base = {
+      mech,
+      power: 70,
+      wind: 0,
+      gravity: 300,
+      def: SHOT_1,
+    };
+
+    // Facing right (default / explicit 1): the absolute angle == the relative.
+    expect(buildShotInput({ ...base, angleDeg: 30 }).angleDeg).toBe(30);
+    expect(buildShotInput({ ...base, angleDeg: 30, facing: 1 }).angleDeg).toBe(30);
+
+    // Facing left (-1): mirrored across the vertical (30 -> 150, 90 -> 90, 0 -> 180).
+    expect(buildShotInput({ ...base, angleDeg: 30, facing: -1 }).angleDeg).toBe(150);
+    expect(buildShotInput({ ...base, angleDeg: 90, facing: -1 }).angleDeg).toBe(90);
+    expect(buildShotInput({ ...base, angleDeg: 0, facing: -1 }).angleDeg).toBe(180);
+  });
+
   it("Test A: applyShot returns the ShotResult shape and mutates HP (PLAY-08)", () => {
     const terrain = freshTerrain();
     const shooter = firingMech("p1");
