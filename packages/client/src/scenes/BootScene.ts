@@ -2,18 +2,18 @@ import Phaser from "phaser";
 import { TerrainMask } from "@shared/sim";
 import type { MapDef } from "@shared/sim";
 import { MAP } from "../world.js";
-import { TerrainView } from "../view/TerrainView.js";
 
 /**
  * Scene init payload handed from BootScene → MatchScene.
  *
- * Carries the live collision mask, the cosmetic terrain texture handle, and
- * the map def. MatchScene consumes these instead of re-deriving them, so the
- * mask is built exactly once (the same authority the previews query).
+ * Carries the live collision mask (the authority) and the map def. MatchScene
+ * consumes these instead of re-deriving them, so the mask is built exactly once
+ * (the same authority the previews query). The cosmetic terrain TEXTURE is
+ * deliberately NOT built here — MatchScene builds it, so its world Image lives
+ * on the Match display list (see BootScene.create note).
  */
 export interface MatchSceneData {
   mask: TerrainMask;
-  terrain: TerrainView;
   map: MapDef;
 }
 
@@ -50,14 +50,15 @@ export class BootScene extends Phaser.Scene {
     }
 
     // (2) The collision authority — byte-identical to the server (SIM-04).
+    // Built once here and handed off. The cosmetic TerrainView mirror is built
+    // INSIDE MatchScene (not here): a terrain Image added to BootScene's display
+    // list is destroyed when this scene shuts down on scene.start, leaving the
+    // global DynamicTexture with nothing rendering it — that was the 02-04
+    // "invisible terrain" bug.
     const mask = TerrainMask.fromMap(MAP);
 
-    // (3) The cosmetic mirror (DynamicTexture). Built here so the terrain
-    // texture exists before MatchScene adds its world objects on top.
-    const terrain = TerrainView.build(this, mask);
-
-    // (4) Hand off the live handles.
-    const data: MatchSceneData = { mask, terrain, map: MAP };
+    // (3) Hand off the live mask + map.
+    const data: MatchSceneData = { mask, map: MAP };
     this.scene.start("Match", data);
   }
 }

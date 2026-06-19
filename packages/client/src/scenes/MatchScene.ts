@@ -62,7 +62,7 @@ type Phase = "AIM" | "RESOLVING" | "OVER";
 
 export class MatchScene extends Phaser.Scene {
   private mask!: MatchSceneData["mask"];
-  private terrain!: MatchSceneData["terrain"];
+  private terrain!: TerrainView;
   private controller!: MatchController;
   private aimView!: AimView;
   private fx!: Fx;
@@ -96,7 +96,11 @@ export class MatchScene extends Phaser.Scene {
 
   create(data: MatchSceneData): void {
     this.mask = data.mask;
-    this.terrain = data.terrain;
+    // Build the cosmetic terrain HERE (not in BootScene) so the world Image is
+    // on THIS scene's display list — a BootScene-owned image is destroyed when
+    // BootScene shuts down on scene.start, which is why the terrain was
+    // invisible. Built first so mechs/aim/FX layer on top of it.
+    this.terrain = TerrainView.build(this, this.mask);
 
     this.buildMatch();
 
