@@ -3,8 +3,9 @@ import { BootScene } from "./scenes/BootScene.js";
 import { MatchScene } from "./scenes/MatchScene.js";
 
 /**
- * Phaser game config. World dims are the MapDef world size (1024x512); the
- * follow-cam (later plan) handles world>viewport. BootScene runs first (loads
+ * Phaser game config. width/height are the design viewport (1024x512,
+ * Scale.FIT); the world (MAP, 2048x768) is larger and the follow-cam scrolls
+ * it. BootScene runs first (loads
  * fonts + builds the mask/terrain) then hands off to MatchScene.
  * backgroundColor matches the UI-SPEC dominant (#0F172A) so there is no white
  * flash before boot.
