@@ -29,7 +29,11 @@ export const SHOT_1: ProjectileDef = {
   id: "shot-1",
   behavior: "default",
   maxDamage: 30,
-  blastRadius: 60,
+  // Tuning (02-04 fun-gate): blastRadius is ALSO the crater radius. 60 cratered
+  // ~half the terrain band depth (too deep on a miss); 36 reads as a shallow
+  // bowl. Dead-center damage is unchanged (independent of blastRadius); the blast
+  // falloff just tightens, rewarding accuracy.
+  blastRadius: 36,
   grazeFloor: 5,
   directHitThreshold: 6,
   directHitBonus: 18,
@@ -50,7 +54,8 @@ export const SHOT_2: ProjectileDef = {
   id: "shot-2",
   behavior: "default",
   maxDamage: 14,
-  blastRadius: 44,
+  // Tuning (02-04 fun-gate): smaller per-sub craters (3 of them); was 44.
+  blastRadius: 28,
   grazeFloor: 3,
   directHitThreshold: 6,
   directHitBonus: 8,
@@ -68,7 +73,9 @@ export const TROJAN: ProjectileDef = {
   id: "trojan",
   behavior: "default",
   maxDamage: 38,
-  blastRadius: 90,
+  // Tuning (02-04 fun-gate): still the biggest crater, but shallower; was 90.
+  // Stays > SHOT_1.blastRadius (the loadout test asserts this ordering).
+  blastRadius: 56,
   grazeFloor: 8,
   directHitThreshold: 8,
   directHitBonus: 14,
