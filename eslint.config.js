@@ -38,6 +38,17 @@ export default tseslint.config(
         },
       ],
       "no-restricted-globals": ["error", "window", "document"],
+      // Honor the leading-underscore convention for intentionally unused
+      // parameters (e.g. the Phase-1 throw-stub signatures, which declare the
+      // real shape but do not consume their args yet).
+      "@typescript-eslint/no-unused-vars": [
+        "error",
+        {
+          argsIgnorePattern: "^_",
+          varsIgnorePattern: "^_",
+          caughtErrorsIgnorePattern: "^_",
+        },
+      ],
     },
   },
 );
