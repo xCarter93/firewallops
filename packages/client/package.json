@@ -1,0 +1,21 @@
+{
+  "name": "@firewallops/client",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit -p ."
+  },
+  "dependencies": {
+    "phaser": "4.1.0",
+    "@shared/sim": "workspace:*"
+  },
+  "devDependencies": {
+    "vite": "^7.3.5",
+    "typescript": "5.9.3",
+    "@types/node": "22.19.21"
+  }
+}
