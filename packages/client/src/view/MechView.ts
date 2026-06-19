@@ -116,13 +116,20 @@ export class MechView {
     this.hpNum.setColor(critical ? HP_TEXT_CRITICAL : HP_TEXT);
   }
 
-  /** Manual HP_RED(0)->HP_GREEN(1) lerp returning a packed 0xRRGGBB int. */
+  // Pre-built endpoint Colors for the HP lerp (HP_RED(0) → HP_GREEN(1)).
+  private static readonly HP_RED_COLOR = Phaser.Display.Color.IntegerToColor(HP_RED);
+  private static readonly HP_GREEN_COLOR = Phaser.Display.Color.IntegerToColor(HP_GREEN);
+
+  /** HP_RED(0)->HP_GREEN(1) lerp returning a packed 0xRRGGBB int (Phaser color API). */
   private static lerpHpColor(frac: number): number {
     const t = Phaser.Math.Clamp(frac, 0, 1);
-    const r = Math.round(((HP_RED >> 16) & 0xff) + (((HP_GREEN >> 16) & 0xff) - ((HP_RED >> 16) & 0xff)) * t);
-    const g = Math.round(((HP_RED >> 8) & 0xff) + (((HP_GREEN >> 8) & 0xff) - ((HP_RED >> 8) & 0xff)) * t);
-    const b = Math.round((HP_RED & 0xff) + ((HP_GREEN & 0xff) - (HP_RED & 0xff)) * t);
-    return (r << 16) | (g << 8) | b;
+    const c = Phaser.Display.Color.Interpolate.ColorWithColor(
+      MechView.HP_RED_COLOR,
+      MechView.HP_GREEN_COLOR,
+      100,
+      t * 100,
+    );
+    return Phaser.Display.Color.GetColor(c.r, c.g, c.b);
   }
 
   /**

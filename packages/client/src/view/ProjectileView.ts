@@ -63,16 +63,15 @@ export class ProjectileView {
       ProjectileView.MAX_FLIGHT_MS,
     );
 
-    const proxy = { p: 0 };
-    this.scene.tweens.add({
-      targets: proxy,
-      p: 1,
+    this.scene.tweens.addCounter({
+      from: 0,
+      to: 1,
       duration: flightMs,
       ease: "Linear",
-      onUpdate: () => {
+      onUpdate: (tween) => {
         const idx = Math.min(
           path.length - 1,
-          Math.floor(proxy.p * (path.length - 1)),
+          Math.floor((tween.getValue() ?? 0) * (path.length - 1)),
         );
         this.place(path[idx].x, path[idx].y);
       },
