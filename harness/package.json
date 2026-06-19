@@ -1,0 +1,14 @@
+{
+  "name": "harness",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "harness": "tsx main.ts",
+    "build": "tsc --noEmit -p .",
+    "check": "tsc --noEmit -p ."
+  },
+  "dependencies": {
+    "@shared/sim": "workspace:*"
+  }
+}
