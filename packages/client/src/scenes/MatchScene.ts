@@ -58,15 +58,19 @@ const PAN_MS = 500; // frame-next-mech camera pan (UI-SPEC max)
 const MAX_SHAKE_MS = 300;
 const SHAKE_PER_DAMAGE = 0.0006; // shake amplitude per HP of total damage
 
-// --- Camera framing (CAM-02). The active mech is framed in the UPPER part of
-// the viewport so it clears the bottom bar + its floating HP. ---
+// --- Camera framing (CAM-02). The active mech is framed in the LOWER THIRD of
+// the viewport so it clears the bottom bar and leaves the bulk of the screen as
+// sky/arc room above. ---
 const BAR_CLEARANCE = 96; // bottom-bar height to clear (matches plan 03 BAR_H = 96)
-// How far BELOW the mech the camera target sits. centerOn(x, y) puts world-y `y`
-// at viewport center (~256/512), so centering on `mech.y + FRAME_OFFSET_Y` pushes
-// the mech UP to viewport-y ≈ 256 − 110 = ~146 — well above the bar top at
-// viewport-y 416 (512 − 96). setBounds clamps near world edges so this never
-// reveals past the top/bottom of the world.
-const FRAME_OFFSET_Y = 110;
+// The mech is framed at this fraction DOWN the viewport (0=top, 1=bottom).
+// `centerOn(x, y)` puts world-y `y` at viewport center (0.5), so the framing
+// offset is `(FRAME_FRAC − 0.5) * cam.height` — proportional to the live
+// viewport so it works at any window height (the canvas now fills the window).
+const FRAME_FRAC = 0.66;
+// Sky headroom: how far the camera bounds extend ABOVE the world top (y<0) so
+// the follow-cam can chase a steep arc up into the sky (the dark backgroundColor
+// fills y<0 — there is no terrain up there). setBounds clamps panning to this.
+const SKY_HEADROOM = 640;
 
 type Phase = "AIM" | "RESOLVING" | "OVER";
 
@@ -124,9 +128,17 @@ export class MatchScene extends Phaser.Scene {
     this.fx = new Fx(this);
     this.hud = new Hud(this, [P1_ID, P2_ID]);
 
-    // Camera: bound to the world (which may exceed the viewport) so follow/pan
-    // stay inside the map.
-    this.cameras.main.setBounds(0, 0, MAP.width, MAP.height);
+    // Camera: bound to the world (wider than the viewport) plus SKY_HEADROOM of
+    // negative-y room ABOVE the world top so a steep arc can be followed up into
+    // the sky (dark background — no terrain there) instead of clipping at y=0.
+    // The world is now deep enough (MAP.height) that the bottom never reveals
+    // background below the ground in a full-window viewport.
+    this.cameras.main.setBounds(
+      0,
+      -SKY_HEADROOM,
+      MAP.width,
+      MAP.height + SKY_HEADROOM,
+    );
 
     // --- Input registration ---
     const kb = this.input.keyboard;
@@ -588,18 +600,21 @@ export class MatchScene extends Phaser.Scene {
   }
 
   /**
-   * Single source of the bottom-bar-clearing framing offset. Centers the camera
-   * on `mech.x, mech.y + FRAME_OFFSET_Y` so the mech sits in the UPPER part of
-   * the viewport, clear of the 96px bottom bar + its floating HP. Used by the
-   * initial frame, C-recenter, turn-start, and rematch so the clearance is
-   * identical everywhere. setBounds clamps the target near the world edges.
+   * Single source of the framing offset. Centers the camera so the mech sits at
+   * FRAME_FRAC down the viewport (lower third) — clear of the 96px bottom bar
+   * with the bulk of the screen as sky/arc room above. The offset is
+   * proportional to the LIVE viewport height (`cam.height`), so it frames
+   * correctly at any window size (the canvas fills the window). Used by the
+   * initial frame, C-recenter, turn-start, and rematch so framing is identical
+   * everywhere. setBounds clamps the target near the world/sky edges.
    */
   private frameOnMech(mech: Mech, animate: boolean): void {
     const cam = this.cameras.main;
+    const targetY = mech.y + (FRAME_FRAC - 0.5) * cam.height;
     if (animate) {
-      cam.pan(mech.x, mech.y + FRAME_OFFSET_Y, PAN_MS, "Quad.easeInOut");
+      cam.pan(mech.x, targetY, PAN_MS, "Quad.easeInOut");
     } else {
-      cam.centerOn(mech.x, mech.y + FRAME_OFFSET_Y);
+      cam.centerOn(mech.x, targetY);
     }
   }
 

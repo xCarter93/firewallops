@@ -8,24 +8,29 @@ import type { MapDef } from "@shared/sim";
  * X positions live here too; their Y is derived at runtime from the mask
  * surface (so the mechs sit on the procedural ground, not a hardcoded height).
  *
- * MAP mirrors the Phase 1 harness map (2048x768, seed 3, baseHeight 400,
+ * MAP mirrors the Phase 1 harness map (2048-wide, seed 3, baseHeight 400,
  * amplitude 40, frequency 0.01) so client and server build byte-identical
- * masks — the SIM-04 parity basis.
+ * masks — the SIM-04 parity basis. The heightmap is a function of x only
+ * (frequency/amplitude/baseHeight/seed), so `height` does NOT change the surface
+ * profile — it only changes how far the solid ground extends BELOW it.
  *
- * Geometry nuance (RESEARCH Pitfall 1): growing `height` 512→768 with
- * `baseHeight` unchanged adds vertical SCROLL-ROOM (the camera can scroll
- * up/down through 768 rows), NOT literal new sky above the mechs — the playable
- * surface stays at ~y=400. This delivers the vertical-follow payoff: a steep
- * arc rises toward y=0 and the 512-tall viewport scrolls up to keep it framed.
+ * Geometry nuance: `height` is the world's vertical extent. The playable surface
+ * stays at ~y=400 regardless; growing `height` 768→1408 just fills more solid
+ * ground underneath. This matters because the canvas now fills the whole browser
+ * window (game-config Scale.RESIZE): a tall viewport (~1300px+) framed on a mech
+ * would otherwise run off the bottom of a 768-tall world and reveal the dark
+ * background as a seam below the terrain. 1408 keeps ground under the deepest
+ * framed view; the sky ABOVE the surface (for steep arcs) comes from the
+ * camera's negative top bound in MatchScene, not from MAP (sky = backgroundColor).
  *
- * Repaint cost (RESEARCH Pitfall 5): `TerrainView.paint` is O(width*height), so
- * 2048x768 is ~3x the per-repaint work of 1024x512 — acceptable because it runs
- * once per resolved shot (never per-frame); revisit with a dirty-rect repaint
- * only if a profiling hitch appears on impact.
+ * Repaint cost: `TerrainView.paint` is O(width*height), so 2048x1408 is ~1.8x the
+ * per-repaint work of 2048x768 — acceptable because it runs once per resolved
+ * shot (never per-frame); revisit with a dirty-rect repaint only if a profiling
+ * hitch appears on impact.
  */
 export const MAP: MapDef = {
   width: 2048,
-  height: 768,
+  height: 1408,
   seed: 3,
   baseHeight: 400,
   amplitude: 40,
