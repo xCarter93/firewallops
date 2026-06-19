@@ -5,19 +5,30 @@ import { SS_HITS_TO_ARM, MOVE_BUDGET_PER_TURN } from "../match/MatchState.js";
 import type { ShotId } from "../match/loadout.js";
 
 /**
- * Screen-space HUD overlay (Phase 2, plan 04) — PLAY-05/06/07/08.
+ * Screen-space HUD overlay (Phase 02.1, plan 03) — HUD-01 / HUD-02.
  *
- * Hand-drawn Phaser `Graphics` / `Text` widgets per the Phase 2 UI-SPEC. Every
- * widget is scroll-locked (`setScrollFactor(0)`) so the HUD stays fixed while
- * the follow-cam scrolls the world. NO emoji glyphs — the wind arrow and charge
- * pips are drawn vector shapes (ui-ux-pro-max no-emoji rule). Color is never the
- * only signal: HP shows a number, the active player gets a label cue, and the
- * shot shows its name.
+ * The Phase-2 floating per-player clusters are GONE. They are replaced by a
+ * single bottom-fixed bar pinned to the VIEWPORT bottom (`setScrollFactor(0)`):
+ * left→right zones SHOT-SELECT · (active control: SS pips + MOVE) · POWER ·
+ * SCORE-stub · TURN list. Wind STAYS top-center (unchanged). HP left the HUD
+ * entirely — it now floats above each mech in-world (MechView, this plan).
+ *
+ * Every bar widget is scroll-locked via `lock()` so it stays fixed while the
+ * follow-cam / right-drag pan scrolls the larger world. The bar pins to the
+ * VIEWPORT bottom (`cam.height - BAR_H`), NEVER the world bottom (Pitfall 3).
+ * NO emoji glyphs — the wind arrow, charge pips and TRJ lock are drawn vector
+ * shapes (ui-ux-pro-max no-emoji rule). Color is never the only signal: the
+ * selected shot shows its glyph, the next player gets a position + NEXT marker.
  *
  * Palette (UI-SPEC): field `#0F172A`, surface `#1E293B`/`#334155`, text
- * `#F8FAFC`, cyan `#22D3EE` (reserved: active cluster + NEXT marker), status
- * green `#22C55E`, threat red `#EF4444`. Typography: Share Tech Mono numerics
- * 24px, Fira Code labels 14px, Orbitron win banner 48px.
+ * `#F8FAFC`, cyan `#22D3EE` (reserved: selected-chip border, power fill, MOVE
+ * fill, turn highlight + NEXT marker), status green `#22C55E`, threat red
+ * `#EF4444`. Typography: Share Tech Mono numerics, Fira Code labels, Orbitron
+ * win banner.
+ *
+ * PUBLIC CONTRACT (held identical so MatchScene needs no Hud-call edit): the
+ * constructor `(scene, playerIds)`, and `flash` / `clearIntro` / `showWinBanner`
+ * / `reset`. `update(...)` only GAINS an optional 5th `power?` param.
  *
  * Pure view: imports match TYPES + constants only, never a sim outcome function
  * (ESLint seam guard on view/**).
@@ -27,34 +38,45 @@ const TEXT = "#F8FAFC";
 const CYAN = 0x22d3ee;
 const GREEN = 0x22c55e;
 const RED = 0xef4444;
+const BAR_FILL = 0x1e293b;
 const SURFACE = 0x334155;
 
-const HP_W = 120;
-const HP_H = 12;
-const MOVE_W = 120;
-const MOVE_H = 8;
+// --- Bottom-bar fixed dimensions (UI-SPEC verbatim) ---
+const BAR_H = 96; // bar height, pinned to viewport bottom, full width
+const BAR_PAD = 16; // md: vertical padding inside the bar
+const EDGE = 24; // lg: bar inset from the left/right screen edges
+
+const CHIP = 56; // shot-select chip 56x56
+const CHIP_GAP = 8; // sm: gap between chips
+
 const PIP_R = 5;
 const PIP_GAP = 4; // xs
-const MARGIN = 24; // lg: HUD inset from screen edge
-const CLUSTER_W = 180;
+
+const MOVE_W = 120;
+const MOVE_H = 8;
+
+const POWER_W = 240; // power meter 240x20
+const POWER_H = 20;
+
+const SCORE_W = 120; // score-stub slot 120x56
+const SCORE_H = 56;
+
+const TURN_ROW_H = 28; // turn-list row height
+const TURN_INSET = 4; // xs
 
 // Wind widget rows (top-center), each clear of the next (no overlap).
+const MARGIN = 24; // lg: top inset for the wind widget
 const WIND_ARROW_Y = MARGIN + 22; // arrow centerline, below the "WIND" label
 const WIND_NUM_Y = MARGIN + 34; // magnitude number, below the arrow
-
-// Player-cluster row offsets (from the cluster `top`). Each widget on its own
-// row so nothing overlaps (02-04 NO-GO fix 4). The draw helpers read these back.
-const ROW_HP_LABEL = 22; // "HP" caption
-const ROW_HP_BAR = 38; // HP bar top (12px tall)
-const ROW_PIPS = 62; // charge-pip centerline
-const ROW_TROJAN = 74; // TROJAN status text
-const ROW_MOVE_LABEL = 94; // "MOVE" caption
-const ROW_MOVE_BAR = 110; // MOVE bar top
-const CLUSTER_H = 134; // highlight box height enclosing all rows
 
 const LABEL_STYLE = {
   fontFamily: "'Fira Code'",
   fontSize: "14px",
+  color: TEXT,
+} as const;
+const LABEL_SM_STYLE = {
+  fontFamily: "'Fira Code'",
+  fontSize: "12px",
   color: TEXT,
 } as const;
 const NUM_STYLE = {
@@ -62,31 +84,64 @@ const NUM_STYLE = {
   fontSize: "24px",
   color: TEXT,
 } as const;
+const NUM_SM_STYLE = {
+  fontFamily: "'Share Tech Mono'",
+  fontSize: "16px",
+  color: TEXT,
+} as const;
 
-interface PlayerCluster {
-  highlight: Phaser.GameObjects.Rectangle;
-  label: Phaser.GameObjects.Text;
-  hpBar: Phaser.GameObjects.Graphics;
-  hpNum: Phaser.GameObjects.Text;
-  pips: Phaser.GameObjects.Graphics;
-  trojan: Phaser.GameObjects.Text;
-  moveBar: Phaser.GameObjects.Graphics;
-  moveLabel: Phaser.GameObjects.Text;
-  shot: Phaser.GameObjects.Text;
-}
+/** The three selectable shot chips, in bar order. */
+const CHIP_DEFS: { id: ShotId; glyph: string }[] = [
+  { id: "shot-1", glyph: "1" },
+  { id: "shot-2", glyph: "2" },
+  { id: "trojan", glyph: "TRJ" },
+];
 
 export class Hud {
   private readonly w: number;
+  private readonly h: number;
+  private readonly barTop: number;
 
   // Wind (top-center).
   private readonly windLabel: Phaser.GameObjects.Text;
   private readonly windArrow: Phaser.GameObjects.Graphics;
   private readonly windNum: Phaser.GameObjects.Text;
 
-  // Turn / who's-next.
-  private readonly nextLabel: Phaser.GameObjects.Text;
+  // Bar chrome (fill + divider).
+  private readonly barG: Phaser.GameObjects.Graphics;
 
-  private readonly clusters: Record<string, PlayerCluster> = {};
+  // Shot-select zone.
+  private readonly shotCaption: Phaser.GameObjects.Text;
+  private readonly chipG: Phaser.GameObjects.Graphics; // chip borders / fills / TRJ lock
+  private readonly chipText: Phaser.GameObjects.Text[] = [];
+  private readonly chipX: number[] = []; // chip left edges (computed once)
+  private chipY = 0;
+
+  // Active-player control zone (SS pips + MOVE budget).
+  private readonly pips: Phaser.GameObjects.Graphics;
+  private readonly moveCaption: Phaser.GameObjects.Text;
+  private readonly moveBar: Phaser.GameObjects.Graphics;
+  private pipsY = 0;
+  private moveBarY = 0;
+  private controlX = 0;
+
+  // Power zone.
+  private readonly powerCaption: Phaser.GameObjects.Text;
+  private readonly powerBar: Phaser.GameObjects.Graphics;
+  private readonly powerNum: Phaser.GameObjects.Text;
+  private powerX = 0;
+  private powerBarY = 0;
+
+  // Score-stub zone.
+  private readonly scoreCaption: Phaser.GameObjects.Text;
+  private readonly scoreValue: Phaser.GameObjects.Text;
+
+  // Turn-list zone.
+  private readonly turnCaption: Phaser.GameObjects.Text;
+  private readonly turnG: Phaser.GameObjects.Graphics; // row highlights
+  private readonly turnRows: Phaser.GameObjects.Text[] = [];
+  private readonly turnX: number;
+  private turnRowsTop = 0;
 
   // Pre-match onboarding hint (clears after the first shot).
   private readonly introHeading: Phaser.GameObjects.Text;
@@ -110,36 +165,113 @@ export class Hud {
   ) {
     const cam = scene.cameras.main;
     this.w = cam.width;
+    this.h = cam.height;
+    // Pin to the VIEWPORT bottom — cam.height - 96, never the world height
+    // (Pitfall 3). BAR_H is 96; the literal is kept here for the bottom pin.
+    this.barTop = cam.height - 96; // === cam.height - BAR_H
 
-    // --- WIND (PLAY-05), top-center. Stacked in CLEAR rows so the label, the
-    // arrow, and the magnitude never overlap (02-04 NO-GO fix 4): label on top,
-    // arrow on its own row below, number under the arrow. ---
+    // --- WIND (top-center) — UNCHANGED from Phase 2. Stacked in clear rows so
+    // label, arrow and magnitude never overlap. ---
     this.windLabel = this.lock(
       scene.add.text(this.w / 2, MARGIN, "WIND", LABEL_STYLE).setOrigin(0.5, 0),
     );
     this.windArrow = this.lock(scene.add.graphics()); // drawn at WIND_ARROW_Y
     this.windNum = this.lock(
-      scene.add
-        .text(this.w / 2, WIND_NUM_Y, "0", NUM_STYLE)
-        .setOrigin(0.5, 0),
+      scene.add.text(this.w / 2, WIND_NUM_Y, "0", NUM_STYLE).setOrigin(0.5, 0),
     );
 
-    // --- NEXT marker (delay queue, PLAY-06), below the wind magnitude ---
-    this.nextLabel = this.lock(
-      scene.add
-        .text(this.w / 2, WIND_NUM_Y + 30, "NEXT ▸ -", LABEL_STYLE)
-        .setOrigin(0.5, 0),
-    );
+    // --- BAR CHROME: full-width 96px rect + top divider, pinned to viewport bottom ---
+    this.barG = this.lock(scene.add.graphics());
+    this.barG.fillStyle(BAR_FILL, 1);
+    this.barG.fillRect(0, this.barTop, this.w, BAR_H);
+    this.barG.lineStyle(2, SURFACE, 1);
+    this.barG.beginPath();
+    this.barG.moveTo(0, this.barTop);
+    this.barG.lineTo(this.w, this.barTop);
+    this.barG.strokePath();
 
-    // --- Per-player clusters: P1 left, P2 right (xl apart via screen edges) ---
-    playerIds.forEach((id, i) => {
-      const left = i === 0;
-      // Right-align P2 so the whole CLUSTER_W stays inside the canvas (no clip).
-      const x = left ? MARGIN : this.w - MARGIN - CLUSTER_W;
-      this.clusters[id] = this.buildCluster(id, x);
+    const captionY = this.barTop + BAR_PAD; // zone captions sit on the top pad row
+    const rowY = captionY + 20; // widget row below its caption
+
+    // --- SHOT-SELECT zone (left) ---
+    this.shotCaption = this.lock(
+      scene.add.text(EDGE, captionY, "SHOT", LABEL_STYLE).setOrigin(0, 0),
+    );
+    this.chipG = this.lock(scene.add.graphics());
+    this.chipY = rowY;
+    CHIP_DEFS.forEach((def, i) => {
+      const x = EDGE + i * (CHIP + CHIP_GAP);
+      this.chipX.push(x);
+      this.chipText.push(
+        this.lock(
+          scene.add
+            .text(x + CHIP / 2, this.chipY + CHIP / 2, def.glyph, LABEL_SM_STYLE)
+            .setOrigin(0.5),
+        ),
+      );
     });
 
-    // --- Pre-match onboarding hint ---
+    // --- ACTIVE-PLAYER CONTROL zone (SS pips + MOVE), adjacent to shot-select ---
+    this.controlX = EDGE + 3 * (CHIP + CHIP_GAP) + 24;
+    this.pipsY = this.chipY + 10;
+    this.moveBarY = this.chipY + CHIP - MOVE_H;
+    this.pips = this.lock(scene.add.graphics());
+    this.moveCaption = this.lock(
+      scene.add
+        .text(this.controlX, this.moveBarY - 16, "MOVE", LABEL_SM_STYLE)
+        .setOrigin(0, 0),
+    );
+    this.moveBar = this.lock(scene.add.graphics());
+
+    // --- POWER zone (center-left) ---
+    this.powerX = this.controlX + MOVE_W + 32;
+    this.powerCaption = this.lock(
+      scene.add.text(this.powerX, captionY, "POWER", LABEL_STYLE).setOrigin(0, 0),
+    );
+    this.powerBarY = rowY;
+    this.powerBar = this.lock(scene.add.graphics());
+    this.powerNum = this.lock(
+      scene.add
+        .text(this.powerX + POWER_W + 12, this.powerBarY + POWER_H / 2, "0%", NUM_STYLE)
+        .setOrigin(0, 0.5),
+    );
+
+    // --- SCORE-stub zone (center-right) ---
+    const scoreX = this.powerX + POWER_W + 96;
+    this.scoreCaption = this.lock(
+      scene.add.text(scoreX, captionY, "SCORE", LABEL_STYLE).setOrigin(0, 0),
+    );
+    this.scoreValue = this.lock(
+      scene.add
+        .text(scoreX + SCORE_W / 2, rowY + SCORE_H / 2 - 16, "0", NUM_STYLE)
+        .setOrigin(0.5, 0.5),
+    );
+
+    // --- TURN list zone (right) ---
+    this.turnX = this.w - EDGE - 120;
+    this.turnCaption = this.lock(
+      scene.add.text(this.turnX, captionY, "TURN", LABEL_STYLE).setOrigin(0, 0),
+    );
+    this.turnRowsTop = rowY;
+    this.turnG = this.lock(scene.add.graphics());
+    // One row per player, sorted live by accumulatedDelay in update(). Pre-create
+    // a row text per player so scaling to P3/P4 later is just more entries.
+    playerIds.forEach((_, i) => {
+      this.turnRows.push(
+        this.lock(
+          scene.add
+            .text(
+              this.turnX + TURN_INSET + 8,
+              this.turnRowsTop + i * TURN_ROW_H + TURN_ROW_H / 2,
+              "",
+              NUM_SM_STYLE,
+            )
+            .setOrigin(0, 0.5),
+        ),
+      );
+    });
+
+    // --- Pre-match onboarding hint (intro body appends the pan/recenter keys) ---
     this.introHeading = this.lock(
       scene.add
         .text(this.w / 2, cam.height / 2 - 30, "FIREWALL OPS", {
@@ -155,7 +287,7 @@ export class Hud {
         .text(
           this.w / 2,
           cam.height / 2 + 14,
-          "P1 — set angle, power, fire.  ↑↓ aim · ←→ move · hold SPACE to charge.",
+          "P1 — set angle, power, fire.  ↑↓ aim · ←→ move · hold SPACE to charge.  ·  RIGHT-DRAG to pan · C to recenter",
           LABEL_STYLE,
         )
         .setOrigin(0.5),
@@ -187,86 +319,6 @@ export class Hud {
     );
   }
 
-  /**
-   * Build one player's HUD cluster anchored at screen X `x`.
-   *
-   * Layout (02-04 NO-GO fix 4): every widget gets its OWN row so nothing
-   * overlaps. The SHOT indicator sits on the header row (clear of the HP bar +
-   * number below it); HP bar, pips, TROJAN status, and MOVE each stack on the
-   * `ROW_*` offsets the draw helpers read back. P2's cluster is anchored so its
-   * full CLUSTER_W stays inside the canvas (no right-edge clipping).
-   */
-  private buildCluster(id: string, x: number): PlayerCluster {
-    const s = this.scene;
-    const label = id.toUpperCase();
-    const top = MARGIN;
-
-    const highlight = this.lock(
-      s.add
-        .rectangle(x - 8, top - 8, CLUSTER_W + 16, CLUSTER_H)
-        .setOrigin(0, 0)
-        .setFillStyle() // outline-only — clear the default black fill
-        .setStrokeStyle(2, CYAN)
-        .setVisible(false),
-    );
-
-    // Header row: "P1" label (left) + SHOT indicator (far edge of the cluster).
-    const labelText = this.lock(
-      s.add.text(x, top, label, LABEL_STYLE).setOrigin(0, 0),
-    );
-    const shot = this.lock(
-      s.add
-        .text(x + CLUSTER_W, top, "SHOT 1", { ...NUM_STYLE, fontSize: "18px" })
-        .setOrigin(1, 0),
-    );
-
-    // Row 1: "HP" caption + bar + number.
-    this.lock(
-      s.add
-        .text(x, top + ROW_HP_LABEL, "HP", { ...LABEL_STYLE, fontSize: "12px" })
-        .setOrigin(0, 0),
-    );
-    const hpBar = this.lock(s.add.graphics());
-    const hpNum = this.lock(
-      s.add
-        .text(x + HP_W + 8, top + ROW_HP_BAR + HP_H / 2, "100", NUM_STYLE)
-        .setOrigin(0, 0.5),
-    );
-
-    // Row 2: charge pips.
-    const pips = this.lock(s.add.graphics());
-
-    // Row 3: TROJAN status line.
-    const trojan = this.lock(
-      s.add
-        .text(x, top + ROW_TROJAN, "TROJAN — LOCKED · LAND 3 HITS TO ARM", {
-          ...LABEL_STYLE,
-          fontSize: "12px",
-        })
-        .setOrigin(0, 0),
-    );
-
-    // Row 4: MOVE label + depleting bar.
-    const moveLabel = this.lock(
-      s.add
-        .text(x, top + ROW_MOVE_LABEL, "MOVE", { ...LABEL_STYLE, fontSize: "12px" })
-        .setOrigin(0, 0),
-    );
-    const moveBar = this.lock(s.add.graphics());
-
-    return {
-      highlight,
-      label: labelText,
-      hpBar,
-      hpNum,
-      pips,
-      trojan,
-      moveBar,
-      moveLabel,
-      shot,
-    };
-  }
-
   /** Lock a game object to the camera (HUD overlay does not scroll). */
   private lock<T extends Phaser.GameObjects.Components.ScrollFactor>(obj: T): T {
     obj.setScrollFactor(0);
@@ -274,59 +326,85 @@ export class Hud {
   }
 
   /**
-   * Refresh every widget from live state. Called each frame from MatchScene.
-   * `selectedShotId` is the firing player's current selection (shown in the
-   * active cluster); `dtMs` drives the armed-pulse phase.
+   * Refresh the bottom bar from live state. Called each frame from MatchScene.
+   * `selectedShotId` is the active player's current selection; `dtMs` drives the
+   * armed-pulse phase; `power` (optional, default 0) drives the power meter — the
+   * new 5th param keeps the existing 4-arg call sites valid (MatchScene passes
+   * `this.power`).
    */
   update(
     state: MatchState,
     controller: MatchController,
     selectedShotId: ShotId,
     dtMs: number,
+    power = 0,
   ): void {
     this.pulseT += dtMs / 1000;
 
-    // --- Wind arrow + magnitude ---
+    // --- Wind arrow + magnitude (top-center, unchanged) ---
     this.drawWindArrow(state.wind);
     this.windNum.setText(`${Math.abs(state.wind).toFixed(0)}`);
 
-    // --- NEXT marker: lowest-accumulated-delay player (advanceTurn's rule) ---
-    let next = state.players[0];
-    for (const p of state.players) {
-      if (p.accumulatedDelay < next.accumulatedDelay) next = p;
-    }
-    this.nextLabel.setText(`NEXT ▸ ${next.id.toUpperCase()}`);
+    const activeId = state.activePlayerId;
+    const armed = controller.isSSArmed(activeId);
+    const activePlayer = state.players.find((p) => p.id === activeId);
 
-    // --- Per-player clusters ---
-    for (const p of state.players) {
-      const cl = this.clusters[p.id];
-      if (!cl) continue;
-      const mech = state.mechs.find((m) => m.id === p.id);
-      const hp = mech ? mech.hp : 0;
-      const isActive = state.activePlayerId === p.id;
-      const armed = controller.isSSArmed(p.id);
+    // --- Shot-select chips ---
+    this.drawChips(selectedShotId, armed);
 
-      cl.highlight.setVisible(isActive);
-      cl.label.setColor(isActive ? "#22D3EE" : TEXT);
+    // --- Active-player control: SS pips + MOVE budget ---
+    this.drawPips(activePlayer ? activePlayer.ssHitCharge : 0, armed);
+    this.drawMove(activePlayer ? activePlayer.moveBudget : 0);
 
-      this.drawHp(cl, hp);
-      this.drawPips(cl, p.ssHitCharge, armed);
-      this.drawMove(cl, p.moveBudget);
+    // --- Power meter ---
+    this.drawPower(power);
 
-      cl.trojan.setText(
-        armed ? "TROJAN — ARMED" : "TROJAN — LOCKED · LAND 3 HITS TO ARM",
-      );
-      cl.trojan.setColor(armed ? "#EF4444" : TEXT);
+    // --- Turn list: rows ordered by lowest accumulatedDelay (acts next first) ---
+    this.drawTurnList(state);
+  }
 
-      // Selected-shot indicator lives on the ACTIVE cluster only.
-      if (isActive) {
-        cl.shot.setVisible(true);
-        cl.shot.setText(this.shotLabel(selectedShotId));
-        cl.shot.setColor(selectedShotId === "trojan" ? "#EF4444" : TEXT);
-      } else {
-        cl.shot.setVisible(false);
+  /** Shot-select chips: selected gets the cyan border; TRJ is locked until armed. */
+  private drawChips(selectedShotId: ShotId, armed: boolean): void {
+    const g = this.chipG;
+    g.clear();
+    CHIP_DEFS.forEach((def, i) => {
+      const x = this.chipX[i];
+      const y = this.chipY;
+      const isTrojan = def.id === "trojan";
+      const selected = def.id === selectedShotId;
+      const locked = isTrojan && !armed;
+
+      // Base fill (dimmed when the TRJ chip is locked).
+      g.fillStyle(SURFACE, locked ? 0.4 : 1);
+      g.fillRect(x, y, CHIP, CHIP);
+
+      // Selected chip border = cyan (reserved #5); TRJ selected additionally
+      // tints threat-red, but the cyan border still marks selection.
+      if (selected) {
+        if (isTrojan) {
+          g.fillStyle(RED, 0.25);
+          g.fillRect(x, y, CHIP, CHIP);
+        }
+        g.lineStyle(2, CYAN, 1);
+        g.strokeRect(x, y, CHIP, CHIP);
       }
-    }
+
+      // Locked TRJ: a small vector lock affordance (NEVER an emoji).
+      if (locked) {
+        const lx = x + CHIP / 2;
+        const ly = y + 14;
+        g.lineStyle(2, 0xf8fafc, 0.6);
+        g.strokeRect(lx - 5, ly, 10, 8); // lock body
+        g.beginPath(); // shackle arc approximated with two strokes
+        g.moveTo(lx - 3, ly);
+        g.lineTo(lx - 3, ly - 4);
+        g.lineTo(lx + 3, ly - 4);
+        g.lineTo(lx + 3, ly);
+        g.strokePath();
+      }
+
+      this.chipText[i].setColor(locked ? "rgba(248,250,252,0.5)" : TEXT);
+    });
   }
 
   /** Draw the wind arrow: direction = sign(wind), length proportional to |wind|. */
@@ -352,40 +430,11 @@ export class Hud {
     g.strokePath();
   }
 
-  /** HP bar 120x12: green healthy -> red, forced critical-red below 25%. */
-  private drawHp(cl: PlayerCluster, hp: number): void {
-    const frac = Phaser.Math.Clamp(hp / 100, 0, 1);
-    const critical = frac < 0.25;
-    const fillInt = critical ? RED : Hud.lerpHpColor(frac);
-
-    const g = cl.hpBar;
-    const x = cl.label.x;
-    const y = (cl.label.y as number) + ROW_HP_BAR;
-    g.clear();
-    g.fillStyle(SURFACE, 1);
-    g.fillRect(x, y, HP_W, HP_H);
-    g.fillStyle(fillInt, 1);
-    g.fillRect(x, y, HP_W * frac, HP_H);
-
-    // ALWAYS render the number (color-is-not-the-only-indicator).
-    cl.hpNum.setText(`${Math.max(0, Math.round(hp))}`);
-    cl.hpNum.setColor(critical ? "#EF4444" : TEXT);
-  }
-
-  /** Manual red(0)->green(1) lerp returning a packed 0xRRGGBB int. */
-  private static lerpHpColor(frac: number): number {
-    const t = Phaser.Math.Clamp(frac, 0, 1);
-    const r = Math.round(0xef + (0x22 - 0xef) * t);
-    const g = Math.round(0x44 + (0xc5 - 0x44) * t);
-    const b = Math.round(0x44 + (0x5e - 0x44) * t);
-    return (r << 16) | (g << 8) | b;
-  }
-
   /** 3 charge pips: filled green / empty surface; armed -> color/opacity pulse. */
-  private drawPips(cl: PlayerCluster, charge: number, armed: boolean): void {
-    const g = cl.pips;
-    const x = cl.label.x;
-    const y = (cl.label.y as number) + ROW_PIPS;
+  private drawPips(charge: number, armed: boolean): void {
+    const g = this.pips;
+    const x = this.controlX;
+    const y = this.pipsY;
     g.clear();
 
     // Armed pulse: oscillate opacity (NO scale transform — stable-animation rule).
@@ -399,12 +448,12 @@ export class Hud {
     }
   }
 
-  /** Depleting move-budget bar. */
-  private drawMove(cl: PlayerCluster, budget: number): void {
+  /** Depleting MOVE-budget bar (cyan reserved #: in-bar controllable state). */
+  private drawMove(budget: number): void {
     const frac = Phaser.Math.Clamp(budget / MOVE_BUDGET_PER_TURN, 0, 1);
-    const g = cl.moveBar;
-    const x = cl.label.x;
-    const y = (cl.label.y as number) + ROW_MOVE_BAR;
+    const g = this.moveBar;
+    const x = this.controlX;
+    const y = this.moveBarY;
     g.clear();
     g.fillStyle(SURFACE, 1);
     g.fillRect(x, y, MOVE_W, MOVE_H);
@@ -412,14 +461,52 @@ export class Hud {
     g.fillRect(x, y, MOVE_W * frac, MOVE_H);
   }
 
-  private shotLabel(id: ShotId): string {
-    switch (id) {
-      case "shot-1":
-        return "SHOT 1";
-      case "shot-2":
-        return "SHOT 2";
-      case "trojan":
-        return "TROJAN";
+  /** Power meter 240x20: cyan fill scaled to power 0-100 + a NN% readout. */
+  private drawPower(power: number): void {
+    const frac = Phaser.Math.Clamp(power / 100, 0, 1);
+    const g = this.powerBar;
+    const x = this.powerX;
+    const y = this.powerBarY;
+    g.clear();
+    g.fillStyle(SURFACE, 1);
+    g.fillRect(x, y, POWER_W, POWER_H);
+    g.fillStyle(CYAN, 1);
+    g.fillRect(x, y, POWER_W * frac, POWER_H);
+    this.powerNum.setText(`${Math.round(power)}%`);
+  }
+
+  /**
+   * Turn list: one row per player, sorted by lowest accumulatedDelay (the same
+   * advanceTurn "acts next" rule the bar renders). The next-up row gets the cyan
+   * highlight + a `NEXT ▸` marker. Structured so adding P3/P4 is just more rows.
+   */
+  private drawTurnList(state: MatchState): void {
+    const ordered = [...state.players].sort(
+      (a, b) => a.accumulatedDelay - b.accumulatedDelay,
+    );
+    const g = this.turnG;
+    g.clear();
+
+    ordered.forEach((p, i) => {
+      const row = this.turnRows[i];
+      if (!row) return;
+      const isNext = i === 0;
+      const top = this.turnRowsTop + i * TURN_ROW_H;
+
+      if (isNext) {
+        g.fillStyle(CYAN, 0.2);
+        g.fillRect(this.turnX, top, 120, TURN_ROW_H);
+        g.lineStyle(2, CYAN, 1);
+        g.strokeRect(this.turnX, top, 120, TURN_ROW_H);
+      }
+
+      const label = p.id.toUpperCase();
+      row.setText(isNext ? `${label}  NEXT ▸` : label);
+      row.setColor(isNext ? "#22D3EE" : TEXT);
+    });
+    // Hide any leftover pre-created rows (e.g. if fewer players than rows).
+    for (let i = ordered.length; i < this.turnRows.length; i++) {
+      this.turnRows[i].setText("");
     }
   }
 
