@@ -1,6 +1,14 @@
 import { describe, it, expect } from "vitest";
-import { TerrainMask, SHOT_2, muzzleOffset } from "@shared/sim";
-import type { Mech, ShotInput } from "@shared/sim";
+import {
+  TerrainMask,
+  SHOT_1,
+  SHOT_2,
+  muzzleOffset,
+  expandFork,
+  simulateTrajectory,
+  resolveShot,
+} from "@shared/sim";
+import type { Mech, ShotInput, Carve, Damage } from "@shared/sim";
 import { MAP } from "../src/match/world.js";
 import { runServerShot, type ServerMech } from "../src/match/resolve.js";
 import { GRAVITY } from "../src/config.js";
@@ -8,47 +16,62 @@ import { MatchController } from "../../client/src/match/MatchController.js";
 import { createInitialState } from "../../client/src/match/MatchState.js";
 
 /**
- * GOLDEN client↔server shot-parity test (NET-01, Agreed Concern #1).
+ * GOLDEN shot-parity test (NET-01).
  *
- * Proves `runServerShot` (server authority) deep-equals the client
- * `MatchController.applyShot` for IDENTICAL inputs. Both sides import the SAME
- * hoisted `expandFork` + SHOT_2 def from `@shared/sim`, so the only thing under
- * test is that the two resolution BODIES stay in lockstep.
+ * PHASE 3 NOTE: after Plan 04 the client no longer RESOLVES shots —
+ * `MatchController.applyShot` is fire-and-forget and the server is the sole
+ * authority. So the parity that survives (and matters) is twofold:
  *
- * The cross-package import of the client MatchController is clean: MatchController
- * lives in the headless `src/match/**` seam (ESLint-gated phaser-free), so it
- * pulls in no Phaser/DOM — Vitest resolves it via the workspace under the
- * bare-Node test environment.
+ *   1. The client's COSMETIC aim preview (`previewTrajectory`, the only local
+ *      sim call left on the client) must trace the SAME arc the server resolves
+ *      and broadcasts — so what the player aims is what the server fires.
+ *   2. The server authority (`runServerShot`) must reproduce the canonical
+ *      `@shared/sim` composition (expandFork → simulateTrajectory primary →
+ *      per-sub resolveShot with per-mech damage summing → clamped HP) exactly —
+ *      no server-only drift in the wrapper.
+ *
+ * Both sides import the SAME hoisted loadout from `@shared/sim`, so a verbatim
+ * server copy is impossible; these tests lock the resolution BODIES in lockstep.
  *
  * IF THIS FAILS: the client preview and the server authority have diverged —
- * the #1 NET-01 risk the reviewers flagged. The hoisted @shared/sim loadout +
- * this test together make divergence impossible to ship silently.
+ * the #1 NET-01 risk the reviewers flagged.
  */
-describe("parity: shot parity (client applyShot deep-equals runServerShot)", () => {
-  it("carves, damage, path, and resulting HP match byte-for-byte for SHOT_2", () => {
-    // Two INDEPENDENT masks so the in-place carves on each side don't
-    // cross-contaminate, but built from the SAME deterministic MAP.
-    const terrainA = TerrainMask.fromMap(MAP); // client side
-    const terrainB = TerrainMask.fromMap(MAP); // server side
+describe("parity: client preview ↔ server authority (NET-01)", () => {
+  const shooterX = 980;
+  const shooterY = 360;
+  const targetX = 1140;
+  const targetY = 405;
+  const mkMechs = () => [
+    { id: "p1", x: shooterX, y: shooterY, hp: 100 },
+    { id: "p2", x: targetX, y: targetY, hp: 100 },
+  ];
 
-    // Identical mech layouts (same ids/x/y/hp). The shot is a 3-way fork aimed
-    // to crater the ground near both mobiles.
-    const shooterX = 980;
-    const shooterY = 360;
-    const targetX = 1140;
-    const targetY = 405;
+  it("the client aim preview arc matches the server authoritative arc (SHOT_1)", () => {
+    const origin = muzzleOffset(shooterX, shooterY, 58);
+    const aim: ShotInput = {
+      x: origin.x,
+      y: origin.y,
+      angleDeg: 58,
+      power: 70,
+      wind: -15,
+      gravity: GRAVITY,
+      projectile: SHOT_1,
+    };
 
-    const mechsClient: Mech[] = [
-      { id: "p1", x: shooterX, y: shooterY, hp: 100 },
-      { id: "p2", x: targetX, y: targetY, hp: 100 },
-    ];
-    const mechsServer: ServerMech[] = [
-      { id: "p1", x: shooterX, y: shooterY, hp: 100 },
-      { id: "p2", x: targetX, y: targetY, hp: 100 },
-    ];
+    // Client cosmetic preview (the surviving local-sim call).
+    const previewTerrain = TerrainMask.fromMap(MAP);
+    const state = createInitialState(mkMechs(), [{ id: "p1" }, { id: "p2" }]);
+    const controller = new MatchController(previewTerrain, state);
+    const previewPath = controller.previewTrajectory(aim);
 
-    // One fixed aim, built from the SHARED muzzle-tip origin (Authority
-    // Decision 4) so both sides launch from the identical barrel tip.
+    // Server authoritative primary arc.
+    const serverTerrain = TerrainMask.fromMap(MAP);
+    const serverResult = runServerShot(aim, SHOT_1, serverTerrain, mkMechs());
+
+    expect(serverResult.path).toEqual(previewPath);
+  });
+
+  it("runServerShot deep-equals a direct @shared/sim resolution for SHOT_2 fork", () => {
     const origin = muzzleOffset(shooterX, shooterY, 62);
     const aim: ShotInput = {
       x: origin.x,
@@ -60,28 +83,54 @@ describe("parity: shot parity (client applyShot deep-equals runServerShot)", () 
       projectile: SHOT_2,
     };
 
-    // --- Client side ---
-    const state = createInitialState(mechsClient, [{ id: "p1" }, { id: "p2" }]);
-    const controller = new MatchController(terrainA, state);
-    const clientResult = controller.applyShot(aim, SHOT_2);
+    // --- Reference: the canonical @shared/sim composition, computed
+    // independently of any server-wrapper code, on its own mask/mechs. ---
+    const refTerrain = TerrainMask.fromMap(MAP);
+    const refMechs: Mech[] = mkMechs();
+    const subShots = expandFork(aim, SHOT_2);
+    const refPrimary = simulateTrajectory(subShots[0], refTerrain);
+    const refCarves: Carve[] = [];
+    const refTotals = new Map<string, number>();
+    for (const sub of subShots) {
+      const { carves, damage } = resolveShot(
+        sub,
+        refTerrain,
+        refMechs,
+        sub.projectile,
+      );
+      refCarves.push(...carves);
+      for (const d of damage) {
+        refTotals.set(d.mechId, (refTotals.get(d.mechId) ?? 0) + d.amount);
+      }
+    }
+    const refDamage: Damage[] = [...refTotals].map(([mechId, amount]) => ({
+      mechId,
+      amount,
+    }));
+    for (const d of refDamage) {
+      const m = refMechs.find((x) => x.id === d.mechId);
+      if (m) m.hp = Math.max(0, m.hp - d.amount);
+    }
 
-    // --- Server side ---
-    const serverResult = runServerShot(aim, SHOT_2, terrainB, mechsServer);
+    // --- Server authority on an INDEPENDENT mask/mechs from the same MAP. ---
+    const srvTerrain = TerrainMask.fromMap(MAP);
+    const srvMechs: ServerMech[] = mkMechs();
+    const serverResult = runServerShot(aim, SHOT_2, srvTerrain, srvMechs);
 
     // Byte-identical outcome.
-    expect(serverResult.carves).toEqual(clientResult.carves);
-    expect(serverResult.damage).toEqual(clientResult.damage);
-    expect(serverResult.path).toEqual(clientResult.path);
-    expect(serverResult.impact).toEqual(clientResult.impact);
+    expect(serverResult.carves).toEqual(refCarves);
+    expect(serverResult.damage).toEqual(refDamage);
+    expect(serverResult.path).toEqual(refPrimary.path);
+    expect(serverResult.impact).toEqual(refPrimary.impact);
 
     // The masks carved identically.
-    expect(Array.from(terrainA.bits)).toEqual(Array.from(terrainB.bits));
+    expect(Array.from(srvTerrain.bits)).toEqual(Array.from(refTerrain.bits));
 
-    // Resulting mech HP matches on both sides.
-    for (const m of mechsServer) {
-      const clientMech = state.mechs.find((c) => c.id === m.id);
-      expect(clientMech).toBeDefined();
-      expect(m.hp).toBe(clientMech!.hp);
+    // Resulting mech HP matches the reference.
+    for (const m of srvMechs) {
+      const ref = refMechs.find((c) => c.id === m.id);
+      expect(ref).toBeDefined();
+      expect(m.hp).toBe(ref!.hp);
     }
   });
 });
