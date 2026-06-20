@@ -25,7 +25,13 @@ export type {
 } from "./types.js";
 
 // Runtime symbols (stubbed in plan 01; real impls land in plans 02/04).
-export { TerrainMask, quantizeCarve } from "./terrain.js";
+export { TerrainMask, quantizeCarve, encodeMaskRLE, decodeMaskRLE } from "./terrain.js";
 export { simulateTrajectory, powerToSpeed } from "./ballistics.js";
 export { DEFAULT_BEHAVIOR, getBehavior } from "./projectile.js";
 export { resolveShot, blastDamage } from "./resolve.js";
+
+// Loadout authority (Phase 3, plan 01 — Agreed Concern #1 / NET-01): the 1/2/
+// Trojan catalog + expandFork + the muzzle-tip launch geometry. The server
+// authority and the client preview import this ONE source — no verbatim copy.
+export { SHOT_1, SHOT_2, TROJAN, LOADOUT, expandFork, BARREL_LEN, muzzleOffset } from "./loadout.js";
+export type { ShotId } from "./loadout.js";
