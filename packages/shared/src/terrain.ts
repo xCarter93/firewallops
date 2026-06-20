@@ -164,3 +164,194 @@ export class TerrainMask {
     this.bits[y * this.width + x] = 0;
   }
 }
+
+/**
+ * Allocation sanity cap for `decodeMaskRLE` — the largest legitimate mask this
+ * phase ever decodes. Mirrors the world `MAP` constants in
+ * packages/client/src/world.ts (2048 x 1408). A hostile snapshot claiming a
+ * larger size is rejected BEFORE `new Uint8Array(width*height)` so a corrupt
+ * header cannot force a huge allocation. Phase 5 reconnection snapshots flow
+ * through this SAME guard — if a real map ever exceeds 2048x1408, bump these
+ * two constants (and the cross-version note below) deliberately.
+ */
+const MAX_W = 2048;
+const MAX_H = 1408;
+
+/**
+ * Run-length encode the flat collision mask into a self-describing byte buffer.
+ *
+ * NET-05 join snapshot: a mid-match joiner (or a Phase 5 reconnect) needs the
+ * FULL current mask in one payload (carve-replay only covers steady-state). This
+ * is the only serialize path off a `TerrainMask`.
+ *
+ * Wire format (little-endian, no external schema needed beyond these bytes):
+ *   - bytes 0..3  : width  as LE uint32
+ *   - bytes 4..7  : height as LE uint32
+ *   - bytes 8..   : a sequence of LEB128 unsigned varint run lengths.
+ *
+ * The mask values are only ever 0 or 1, so runs alternate value 0,1,0,1,…. The
+ * FIRST run is ALWAYS the count of leading 0 (air) bits — emit a zero-length
+ * first run when `bits[0] === 1`. The run lengths MUST sum to `width*height`.
+ * LEB128 (7 data bits/byte, high bit = continuation) is used so a run wider than
+ * 255 (a full air row is `width` wide) is never truncated.
+ *
+ * v0 wire format has no magic/version byte; add one before any cross-version
+ * snapshot in Phase 5 — the self-describing LE-dimension header already prevents
+ * a stale-MAP decode, so a magic byte adds wire churn for no Phase 3 benefit.
+ *
+ * Pure: no DOM, engine, network, or Node-only types — only Uint8Array,
+ * DataView, and Math (all ES2022 built-ins under the shared tsconfig).
+ */
+export function encodeMaskRLE(mask: TerrainMask): Uint8Array {
+  if (mask.bits.length !== mask.width * mask.height) {
+    throw new Error("encodeMaskRLE: bits length does not match width*height");
+  }
+
+  // Collect alternating run lengths starting from value 0 (air). A leading
+  // solid pixel produces a zero-length first run so decode's "start at 0" rule
+  // holds with no special case.
+  const runs: number[] = [];
+  let current = 0; // the value the next run counts
+  let run = 0;
+  for (let i = 0; i < mask.bits.length; i++) {
+    const v = mask.bits[i];
+    if (v === current) {
+      run++;
+    } else {
+      runs.push(run);
+      current = current === 0 ? 1 : 0;
+      run = 1;
+    }
+  }
+  // Push the final run. For an empty mask (length 0) the single run is 0.
+  runs.push(run);
+
+  // Size the output exactly: 8-byte header + varint bytes for every run.
+  let varintBytes = 0;
+  for (const r of runs) {
+    varintBytes += varintByteLength(r);
+  }
+
+  const out = new Uint8Array(8 + varintBytes);
+  const view = new DataView(out.buffer);
+  view.setUint32(0, mask.width, true);
+  view.setUint32(4, mask.height, true);
+
+  let offset = 8;
+  for (const r of runs) {
+    offset = writeVarint(out, offset, r);
+  }
+  return out;
+}
+
+/** Number of LEB128 bytes a non-negative integer encodes to. */
+function varintByteLength(value: number): number {
+  let n = 1;
+  let v = value;
+  while (v >= 0x80) {
+    v = Math.floor(v / 0x80);
+    n++;
+  }
+  return n;
+}
+
+/** Write a non-negative integer as LEB128 at `offset`; returns the new offset. */
+function writeVarint(out: Uint8Array, offset: number, value: number): number {
+  let v = value;
+  let o = offset;
+  while (v >= 0x80) {
+    out[o++] = (v & 0x7f) | 0x80;
+    v = Math.floor(v / 0x80);
+  }
+  out[o++] = v & 0x7f;
+  return o;
+}
+
+/**
+ * Decode a self-describing RLE buffer (see {@link encodeMaskRLE}) back into a
+ * byte-identical `TerrainMask`.
+ *
+ * SIGNATURE NOTE: takes a SINGLE `bytes` argument — width/height come from the
+ * header, NOT from the caller. This diverges from the RESEARCH.md sketch
+ * `decodeMaskRLE(bytes, width, height)`: the header-carries-dimensions form
+ * makes the payload fully self-describing, so a client can never decode against
+ * a stale MAP size.
+ *
+ * HARDENED against corrupt/hostile snapshots (Agreed Concern #7 — Codex/Cursor
+ * "decode DoS/corrupt-buffer"). Every guard runs BEFORE the matching allocation
+ * or write, so a malformed buffer fails loudly rather than allocating huge
+ * memory or producing a silently-wrong collision mask:
+ *   - short header   → throw before reading the LE uint32s
+ *   - non-positive   → throw before allocating
+ *   - over-bounds    → throw before allocating (MAX_W x MAX_H cap)
+ *   - unterminated   → throw if a varint's continuation bit runs off the buffer
+ *   - run overflow   → throw if a varint accumulates past width*height
+ *   - run past mask  → throw before the fill loop (no out-of-bounds writes)
+ *   - underfill      → throw if the runs do not sum to width*height
+ *
+ * Pure: no DOM, engine, network, or Node-only types — throws plain Errors and
+ * references only local integer constants. SIM-04 purity gate stays green.
+ */
+export function decodeMaskRLE(bytes: Uint8Array): TerrainMask {
+  // --- Header guards (BEFORE any read of dimensions / any allocation) ---
+  if (bytes.length < 8) {
+    throw new Error("decodeMaskRLE: buffer shorter than 8-byte header");
+  }
+
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const width = view.getUint32(0, true);
+  const height = view.getUint32(4, true);
+
+  if (width <= 0 || height <= 0) {
+    throw new Error("decodeMaskRLE: non-positive dimensions");
+  }
+  if (width > MAX_W || height > MAX_H) {
+    throw new Error("decodeMaskRLE: dimensions exceed map bounds");
+  }
+
+  const total = width * height;
+  // Allocate ONLY after the guards pass.
+  const bits = new Uint8Array(total);
+
+  let readCursor = 8;
+  let writeCursor = 0;
+  let value = 0; // first run is air (0), then alternate
+
+  while (readCursor < bytes.length) {
+    // --- Decode one LEB128 varint with overflow + unterminated guards ---
+    let run = 0;
+    let shift = 1; // multiplier for the current 7-bit group (1, 128, 16384, …)
+    let byte: number;
+    do {
+      if (readCursor >= bytes.length) {
+        throw new Error("decodeMaskRLE: unterminated varint");
+      }
+      byte = bytes[readCursor++];
+      run += (byte & 0x7f) * shift;
+      if (run > total) {
+        throw new Error("decodeMaskRLE: run length overflow");
+      }
+      shift *= 0x80;
+    } while ((byte & 0x80) !== 0);
+
+    // --- Bounds-check BEFORE filling (no out-of-bounds writes) ---
+    if (writeCursor + run > total) {
+      throw new Error("decodeMaskRLE: run overflows width*height");
+    }
+
+    if (value === 1) {
+      bits.fill(1, writeCursor, writeCursor + run);
+    }
+    // value 0 runs are already 0 from the zero-filled allocation.
+    writeCursor += run;
+    value = value === 0 ? 1 : 0;
+  }
+
+  // The runs MUST exactly fill the mask — a truncated/corrupt buffer that under-
+  // fills fails loudly rather than yielding a silently-wrong mask.
+  if (writeCursor !== total) {
+    throw new Error("decodeMaskRLE: run lengths do not fill width*height");
+  }
+
+  return new TerrainMask(width, height, bits);
+}
