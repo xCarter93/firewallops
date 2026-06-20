@@ -9,3 +9,5 @@ node_modules/
 dist/
 coverage/
 *.tsbuildinfo
+
+.env.local
