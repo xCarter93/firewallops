@@ -1,3 +1,10 @@
 packages:
   - "packages/*"
   - "harness"
+
+# pnpm 11 build-script approval (renamed from onlyBuiltDependencies; the
+# package.json `pnpm` field is no longer read). Both ship prebuilt binaries
+# for linux-x64/glibc (node:22-slim), so no compiler is needed in the image.
+allowBuilds:
+  esbuild: true
+  msgpackr-extract: true
