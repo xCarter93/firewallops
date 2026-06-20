@@ -69,6 +69,12 @@ importers:
       '@colyseus/core':
         specifier: 0.17.43
         version: 0.17.43(@colyseus/better-call@1.3.3(zod@4.4.3))(@colyseus/schema@4.0.26(typescript@6.0.3))(@colyseus/ws-transport@0.17.13)(@pm2/io@6.1.0)(express@4.22.2)(zod@4.4.3)
+      '@colyseus/redis-driver':
+        specifier: 0.17.7
+        version: 0.17.7(@colyseus/better-call@1.3.3(zod@4.4.3))(@colyseus/schema@4.0.26(typescript@6.0.3))(@colyseus/ws-transport@0.17.13)(@pm2/io@6.1.0)(express@4.22.2)(zod@4.4.3)
+      '@colyseus/redis-presence':
+        specifier: 0.17.7
+        version: 0.17.7(@colyseus/better-call@1.3.3(zod@4.4.3))(@colyseus/schema@4.0.26(typescript@6.0.3))(@colyseus/ws-transport@0.17.13)(@pm2/io@6.1.0)(express@4.22.2)(zod@4.4.3)
       '@colyseus/schema':
         specifier: 4.0.26
         version: 4.0.26(typescript@6.0.3)
@@ -84,13 +90,25 @@ importers:
       convex:
         specifier: 1.41.0
         version: 1.41.0
+      cors:
+        specifier: 2.8.6
+        version: 2.8.6
       express:
         specifier: ^4.21.0
         version: 4.22.2
+      ioredis:
+        specifier: 5.11.1
+        version: 5.11.1
       zod:
         specifier: 4.4.3
         version: 4.4.3
     devDependencies:
+      '@colyseus/sdk':
+        specifier: 0.17.43
+        version: 0.17.43(@colyseus/core@0.17.43)(typescript@6.0.3)(zod@4.4.3)
+      '@types/cors':
+        specifier: ^2.8.17
+        version: 2.8.19
       '@types/express':
         specifier: ^4.17.21
         version: 4.17.25
@@ -1088,6 +1106,9 @@ packages:
   '@types/connect@3.4.38':
     resolution: {integrity: sha512-K6uROf1LD88uDQqJCktA4yzL1YYAK6NgfsI0v/mTgyPKWsX1CnJ0XPSDhViejru1GcRkLWb8RlzFYJRqGUbaug==}
 
+  '@types/cors@2.8.19':
+    resolution: {integrity: sha512-mFNylyeyqN93lfe/9CSxOGREz8cpzAhH+E93xJ4xWQf62V8sQ/24reV2nyzUWM6H6Xji+GGHpkbLe7pVoUEskg==}
+
   '@types/deep-eql@4.0.2':
     resolution: {integrity: sha512-c9h9dVVMigMPc4bwTvC5dxqtqJZwQPePsWjPlpSOnojbor6pGqdk541lfA7AqFQr5pB1BRdq0juY9db81BwyFw==}
 
@@ -1400,6 +1421,10 @@ packages:
   cookie@0.7.2:
     resolution: {integrity: sha512-yki5XnKuf750l50uGTllt6kKILY4nQ1eNIQatoXEByZ5dWgnKqbnqmTrBE5B4N7lrMJKQ2ytWMiTO2o0v6Ew/w==}
     engines: {node: '>= 0.6'}
+
+  cors@2.8.6:
+    resolution: {integrity: sha512-tJtZBBHA6vjIAaF6EnIaq6laBBP9aq/Y3ouVJjEfoHbRBcHBAHYcMh/w8LDrk2PvIMMq8gmopa5D4V8RmbrxGw==}
+    engines: {node: '>= 0.10'}
 
   cross-spawn@7.0.6:
     resolution: {integrity: sha512-uV2QOWP2nWzsy2aMp8aRibhi9dlzF5Hgh5SHaB9OiTGEyDTiJJyx0uy51QXdyWbtAHNua4XJzUKca3OzKUd3vA==}
@@ -1977,6 +2002,10 @@ packages:
 
   oauth-sign@0.9.0:
     resolution: {integrity: sha512-fexhUFFPTGV8ybAtSIGbV6gOkSv8UtRbDBnAyLQw4QPKkgNlsH2ByPGtMUqdWkos6YCRmAqViwgZrJc/mRDzZQ==}
+
+  object-assign@4.1.1:
+    resolution: {integrity: sha512-rJgTQnkUnH1sFw8yT6VSU3zD3sWmu6sZhIseY8VX+GRu3P6F7Fu+JNDoXfklElbLJSnc3FUQHVe4cU5hj+BcUg==}
+    engines: {node: '>=0.10.0'}
 
   object-inspect@1.13.4:
     resolution: {integrity: sha512-W67iLl4J2EXEGTbfeHCffrjDfitvLANg0UlX3wFUUSTx92KXRFegMHUVgSqE+wvhAbi4WqjGg9czysTV2Epbew==}
@@ -3152,6 +3181,10 @@ snapshots:
     dependencies:
       '@types/node': 22.19.21
 
+  '@types/cors@2.8.19':
+    dependencies:
+      '@types/node': 22.19.21
+
   '@types/deep-eql@4.0.2': {}
 
   '@types/estree@1.0.9': {}
@@ -3519,6 +3552,11 @@ snapshots:
     optional: true
 
   cookie@0.7.2: {}
+
+  cors@2.8.6:
+    dependencies:
+      object-assign: 4.1.1
+      vary: 1.1.2
 
   cross-spawn@7.0.6:
     dependencies:
@@ -4187,6 +4225,8 @@ snapshots:
   node-os-utils@2.0.3: {}
 
   oauth-sign@0.9.0: {}
+
+  object-assign@4.1.1: {}
 
   object-inspect@1.13.4: {}
 

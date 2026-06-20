@@ -10,29 +10,107 @@
  *   - `ServerOptions.transport` takes a `WebSocketTransport` (re-exported from `colyseus`).
  *   - `ServerOptions.express(app)` is the documented hook to configure Express routes;
  *     the transport initialises the Express-compatible app and hands it back here, so
- *     `registerMetaRoutes(app)` mounts `/internal/*` on the same HTTP server.
- *   - `gameServer.listen(PORT)` owns the HTTP server lifecycle (no manual
- *     `http.createServer` needed).
- * Importing `Server` + `WebSocketTransport` from `colyseus` (a direct dep that
- * re-exports both) avoids depending on the transitive `@colyseus/ws-transport` path.
+ *     `registerHealthRoute(app)` + `registerMetaRoutes(app)` mount on the same HTTP server.
+ *   - `ServerOptions.presence`/`.driver` wire Redis ONLY when REDIS_URL is set.
+ *   - `ServerOptions.beforeListen` runs the bounded boot connectivity checks.
+ *   - `gameServer.listen(PORT, host)` owns the HTTP server lifecycle (no manual
+ *     `http.createServer` needed) and binds the dual-stack `::` host (Railway).
+ *
+ * DEPLOY (Plan 04-03): PORT/BIND_HOST are env-driven; the bind host hard-defaults
+ * to the dual-stack `::` via a DEDICATED `BIND_HOST` env — NOT the generic
+ * `HOSTNAME`, which Docker/Railway set to the container hostname (Codex concern
+ * #4) — and is NEVER `0.0.0.0` (IPv4-only is unreachable on Railway's dual-stack
+ * private network). Redis presence/driver are wired only when `REDIS_URL` is set,
+ * so local dev (no env) keeps the in-memory default. `buildServer()` is exported
+ * so the boot-smoke test boots the EXACT production wiring; the auto-listen is
+ * guarded to the main module so importing the factory in a test does not
+ * double-listen.
  */
 import { Server, WebSocketTransport } from "colyseus";
 import type { Application } from "express";
 import { registerMetaRoutes } from "./meta/routes.js";
+import { registerHealthRoute, runBootChecks } from "./health.js";
+import { resolveRedisWiring } from "./redis.js";
 import { MatchRoom } from "./rooms/MatchRoom.js";
 
-/** Default Colyseus WS port — clients connect to ws://localhost:2567 (Plan 04). */
-export const PORT = 2567;
+/**
+ * Resolve the listen port from `process.env.PORT` (default 2567 — clients connect
+ * to ws://localhost:2567 locally).
+ */
+export function resolvePort(): number {
+  return Number(process.env.PORT ?? 2567);
+}
 
-const gameServer = new Server({
-  transport: new WebSocketTransport(),
-  express: (app: Application) => {
-    registerMetaRoutes(app);
-  },
-});
+/**
+ * Resolve the bind host (Codex concern #4). Hard-defaults to the dual-stack `::`
+ * (Railway requires `::`, NOT `0.0.0.0`). A DEDICATED `BIND_HOST` env overrides
+ * it; the generic `HOSTNAME` (the container hostname on Docker/Railway) is
+ * deliberately NOT honored for the bind.
+ */
+export function resolveBindHost(): string {
+  return process.env.BIND_HOST ?? "::";
+}
 
-gameServer.define("match", MatchRoom);
+/** Default Colyseus WS port — exported for back-compat with existing imports. */
+export const PORT = resolvePort();
 
-gameServer.listen(PORT).then(() => {
-  console.log(`[server] Colyseus listening on ws://localhost:${PORT}`);
-});
+/**
+ * Build the configured Colyseus `Server` (the EXACT production wiring). Exported
+ * so the boot-smoke test can boot it on an ephemeral port without going through
+ * the auto-listen path.
+ */
+export function buildServer(): Server {
+  const redisUrl = process.env.REDIS_URL; // unset locally → in-memory default
+  const redisWiring = resolveRedisWiring(redisUrl);
+
+  const gameServer = new Server({
+    transport: new WebSocketTransport(),
+    // Wire Redis presence/driver ONLY when REDIS_URL is set (local dev keeps the
+    // in-memory default).
+    ...(redisWiring
+      ? { presence: redisWiring.presence, driver: redisWiring.driver }
+      : {}),
+    gracefullyShutdown: true,
+    express: (app: Application) => {
+      registerHealthRoute(app);
+      registerMetaRoutes(app);
+    },
+    beforeListen: async () => {
+      await runBootChecks(redisUrl);
+    },
+  });
+
+  gameServer.define("match", MatchRoom);
+  return gameServer;
+}
+
+/**
+ * Start the server on the resolved port + bind host. Only invoked as the main
+ * module (the real `pnpm start` / container entrypoint), so test imports of
+ * `buildServer()` do not double-listen.
+ */
+async function main(): Promise<void> {
+  const port = resolvePort();
+  const host = resolveBindHost();
+  const gameServer = buildServer();
+  await gameServer.listen(port, host);
+  console.log(`[server] Colyseus listening on ${host}:${port}`);
+}
+
+// Auto-listen only when run as the entrypoint (tsx src/index.ts), not on import.
+const isMain = (() => {
+  try {
+    const entry = process.argv[1] ?? "";
+    return (
+      entry.endsWith("index.ts") ||
+      entry.endsWith("index.js") ||
+      entry.includes("/server/src/index")
+    );
+  } catch {
+    return false;
+  }
+})();
+
+if (isMain) {
+  void main();
+}
