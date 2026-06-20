@@ -6,9 +6,10 @@ import tseslint from "typescript-eslint";
 export default tseslint.config(
   // Global ignores: never lint build output, deps, or repo tooling. Without
   // this, `eslint .` walks packages/client/dist (minified phaser bundle) and
-  // .claude/hooks (vendored GSD harness scripts) and floods with errors.
+  // the vendored GSD harness scripts under .claude/hooks and .codex/hooks, and
+  // floods with errors.
   {
-    ignores: ["**/dist/**", "**/node_modules/**", ".claude/**"],
+    ignores: ["**/dist/**", "**/node_modules/**", ".claude/**", ".codex/**"],
   },
   ...tseslint.configs.recommended,
   {

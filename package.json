@@ -9,7 +9,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "lint": "eslint .",
-    "typecheck": "tsc -p packages/shared --noEmit"
+    "typecheck": "pnpm -r typecheck"
   },
   "devDependencies": {
     "typescript": "6.0.3",
