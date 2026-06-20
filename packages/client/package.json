@@ -10,12 +10,13 @@
     "typecheck": "tsc --noEmit -p ."
   },
   "dependencies": {
-    "phaser": "4.1.0",
-    "@shared/sim": "workspace:*"
+    "@colyseus/sdk": "0.17.43",
+    "@shared/sim": "workspace:*",
+    "phaser": "4.1.0"
   },
   "devDependencies": {
-    "vite": "^7.3.5",
+    "@types/node": "22.19.21",
     "typescript": "6.0.3",
-    "@types/node": "22.19.21"
+    "vite": "^7.3.5"
   }
 }
