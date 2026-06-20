@@ -12,12 +12,12 @@
     "typecheck": "tsc -p packages/shared --noEmit"
   },
   "devDependencies": {
-    "typescript": "5.9.3",
+    "typescript": "6.0.3",
     "vitest": "4.1.9",
     "@vitest/coverage-v8": "4.1.9",
     "eslint": "9.39.0",
     "typescript-eslint": "8.61.1",
     "@types/node": "22.19.21",
-    "tsx": "4.22.0"
+    "tsx": "4.22.4"
   }
 }
