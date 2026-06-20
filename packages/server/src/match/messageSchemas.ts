@@ -49,3 +49,18 @@ export const selectItemSchema = z.object({
   itemId: z.enum(ITEM_IDS),
 });
 export type SelectItemMessage = z.infer<typeof selectItemSchema>;
+
+/**
+ * `POST /internal/match-results` body schema (review H7).
+ *
+ * The match-results write endpoint is service-to-service (gated by a shared
+ * secret in routes.ts); this schema is the validation half — a request that fails
+ * it is rejected with 400 before any record. `winnerTeam` is the finite team
+ * index (-1 is the draw sentinel the room uses). `resultId` is the REQUIRED
+ * idempotency key the route de-dups on so a retried/duplicate write is a no-op.
+ */
+export const matchResultSchema = z.object({
+  winnerTeam: z.number().int(),
+  resultId: z.string().min(1),
+});
+export type MatchResultMessage = z.infer<typeof matchResultSchema>;
