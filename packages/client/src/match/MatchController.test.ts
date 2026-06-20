@@ -1,15 +1,23 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { TerrainMask, simulateTrajectory } from "@shared/sim";
-import type { MapDef, Mech } from "@shared/sim";
+import type { MapDef, Mech, ProjectileDef, ShotInput } from "@shared/sim";
 import { MatchController } from "./MatchController.js";
 import { createInitialState } from "./MatchState.js";
 import { buildShotInput } from "./aim.js";
-import { SHOT_1, SHOT_2, TROJAN } from "./loadout.js";
+import { SHOT_1, SHOT_2 } from "./loadout.js";
 
 /**
- * Seam suite (Wave 0, 02-VALIDATION) — PLAY-01/02/04/06/07/08 + shotResult shape.
+ * Seam suite (Wave 0, 02-VALIDATION + Phase 3 fire-and-forget contract).
  *
  * Headless: imports only @shared/sim and sibling match modules (no phaser).
+ *
+ * PHASE 3 CONTRACT CHANGE (NET-01): `applyShot` is now FIRE-AND-FORGET — it
+ * forwards (aim, def) to an injected sender and returns void. It NO LONGER
+ * resolves the shot, mutates HP, carves the mask, ticks SS-charge, or
+ * accumulates delay (those are server-authoritative now). The tests below assert
+ * the new contract (spy invoked, void return, no local HP mutation) and keep the
+ * still-live methods (previewTrajectory / advanceTurn / checkWin / rollWind /
+ * isSSArmed) covered for the env-gated hotseat path.
  */
 
 const MAP: MapDef = {
@@ -21,7 +29,7 @@ const MAP: MapDef = {
   frequency: 0.01,
 };
 
-/** Fresh mask per test — resolveShot MUTATES it. */
+/** Fresh mask per test. */
 function freshTerrain(): TerrainMask {
   return TerrainMask.fromMap(MAP);
 }
@@ -35,7 +43,11 @@ function firingMech(id: string): Mech {
  * Place a target mech exactly where a given aim's primary arc lands, so the
  * blast is guaranteed to register a direct hit regardless of map tuning.
  */
-function targetAtImpact(id: string, aim: Parameters<typeof simulateTrajectory>[0], terrain: TerrainMask): Mech {
+function targetAtImpact(
+  id: string,
+  aim: Parameters<typeof simulateTrajectory>[0],
+  terrain: TerrainMask,
+): Mech {
   const { impact } = simulateTrajectory(aim, terrain);
   if (!impact) throw new Error("test aim did not land — adjust fixture");
   return { id, x: impact.x, y: impact.y, hp: 100 };
@@ -93,7 +105,7 @@ describe("MatchController seam", () => {
     expect(buildShotInput({ ...base, angleDeg: 0, facing: -1 }).angleDeg).toBe(180);
   });
 
-  it("Test A: applyShot returns the ShotResult shape and mutates HP (PLAY-08)", () => {
+  it("Test A (Phase 3): applyShot fire-and-forwards to the injected sender and returns void", () => {
     const terrain = freshTerrain();
     const shooter = firingMech("p1");
     const aim = landingAim(shooter, SHOT_1);
@@ -102,60 +114,65 @@ describe("MatchController seam", () => {
     const state = createInitialState([shooter, target], [{ id: "p1" }, { id: "p2" }]);
     const mc = new MatchController(terrain, state);
 
-    const before = target.hp;
+    const sender = vi.fn<(aim: ShotInput, def: ProjectileDef) => void>();
+    mc.setFireSender(sender);
+
+    const beforeTargetHp = target.hp;
+    const beforeShooterHp = shooter.hp;
+    const beforeDelay = state.players[0].accumulatedDelay;
+    const beforeCharge = state.players[0].ssHitCharge;
+
     const result = mc.applyShot(aim, SHOT_1);
 
-    expect(result).toHaveProperty("path");
-    expect(result).toHaveProperty("impact");
-    expect(result).toHaveProperty("carves");
-    expect(result).toHaveProperty("damage");
-    expect(result.path.length).toBeGreaterThan(0);
+    // Fire-and-forget: forwards (aim, def) to the sender, returns undefined.
+    expect(result).toBeUndefined();
+    expect(sender).toHaveBeenCalledTimes(1);
+    expect(sender).toHaveBeenCalledWith(aim, SHOT_1);
 
-    const dealt = result.damage
-      .filter((d) => d.mechId === "p2")
-      .reduce((a, d) => a + d.amount, 0);
-    expect(dealt).toBeGreaterThan(0);
-    expect(target.hp).toBe(Math.max(0, before - dealt));
+    // It must NOT mutate any local state — HP/delay/SS-charge are server-authoritative now.
+    expect(target.hp).toBe(beforeTargetHp);
+    expect(shooter.hp).toBe(beforeShooterHp);
+    expect(state.players[0].accumulatedDelay).toBe(beforeDelay);
+    expect(state.players[0].ssHitCharge).toBe(beforeCharge);
   });
 
-  it("Test B: SHOT_2 fork produces multiple carves (PLAY-04 multi-carve)", () => {
+  it("Test A2: applyShot with no sender injected is a safe no-op (does not throw, no mutation)", () => {
     const terrain = freshTerrain();
     const shooter = firingMech("p1");
-    const aim = landingAim(shooter, SHOT_2);
+    const aim = landingAim(shooter, SHOT_1);
     const target = targetAtImpact("p2", aim, terrain);
-
     const state = createInitialState([shooter, target], [{ id: "p1" }, { id: "p2" }]);
     const mc = new MatchController(terrain, state);
 
-    const result = mc.applyShot(aim, SHOT_2);
-    expect(result.carves.length).toBeGreaterThanOrEqual(2);
+    expect(() => mc.applyShot(aim, SHOT_2)).not.toThrow();
+    expect(target.hp).toBe(100);
   });
 
-  it("Test C: delay queue picks lowest-delay-next and lets a low-delay player act twice (PLAY-06)", () => {
+  it("Test C: advanceTurn picks the lowest accumulated delay (delay queue is still live for hotseat) (PLAY-06)", () => {
     const terrain = freshTerrain();
     const p1Mech = firingMech("p1");
     const p2Mech: Mech = { id: "p2", x: 900, y: 300, hp: 100 };
     const state = createInitialState([p1Mech, p2Mech], [{ id: "p1" }, { id: "p2" }]);
     const mc = new MatchController(terrain, state);
 
-    // P1 (active) fires a low-delay SHOT_1 (+10).
     expect(state.activePlayerId).toBe("p1");
-    mc.applyShot(buildShotInput({ mech: p1Mech, angleDeg: 45, power: 50, wind: 0, gravity: 300, def: SHOT_1 }), SHOT_1);
-    expect(state.players[0].accumulatedDelay).toBe(10);
 
-    // P2's turn: fires a high-delay Trojan (+40).
-    state.activePlayerId = "p2";
-    mc.applyShot(buildShotInput({ mech: p2Mech, angleDeg: 135, power: 50, wind: 0, gravity: 300, def: TROJAN }), TROJAN);
-    expect(state.players[1].accumulatedDelay).toBe(40);
-
-    // advanceTurn -> lower accumulated delay is P1 (10 < 40).
+    // Hotseat drives the delay queue directly off state (applyShot no longer
+    // accumulates delay). P1 has the lower accumulator → acts next.
+    state.players[0].accumulatedDelay = 10;
+    state.players[1].accumulatedDelay = 40;
     mc.advanceTurn();
     expect(state.activePlayerId).toBe("p1");
 
-    // P1 fires again low-delay (+10 => 20), still below P2's 40.
-    mc.applyShot(buildShotInput({ mech: p1Mech, angleDeg: 45, power: 50, wind: 0, gravity: 300, def: SHOT_1 }), SHOT_1);
+    // P1 acts again (still 20 < 40) before P2.
+    state.players[0].accumulatedDelay = 20;
     mc.advanceTurn();
-    expect(state.activePlayerId).toBe("p1"); // acted twice before P2
+    expect(state.activePlayerId).toBe("p1");
+
+    // Once P1 overtakes P2's accumulator, P2 acts next.
+    state.players[0].accumulatedDelay = 50;
+    mc.advanceTurn();
+    expect(state.activePlayerId).toBe("p2");
   });
 
   it("Test D: checkWin declares last mech standing (PLAY-07)", () => {
@@ -171,43 +188,24 @@ describe("MatchController seam", () => {
     expect(mc.checkWin()).toBe("p1");
   });
 
-  it("Test E: SS arms at 3 hits and resets when the Trojan fires", () => {
+  it("Test E: isSSArmed reads the live ssHitCharge against the arm threshold", () => {
     const terrain = freshTerrain();
-    const shooter = firingMech("p1");
-    const aim = landingAim(shooter, SHOT_1);
-    const target = targetAtImpact("p2", aim, terrain);
-    target.hp = 10_000; // keep it alive across repeated hits
-
-    const state = createInitialState([shooter, target], [{ id: "p1" }, { id: "p2" }]);
+    const a: Mech = { id: "p1", x: 100, y: 300, hp: 100 };
+    const b: Mech = { id: "p2", x: 900, y: 300, hp: 100 };
+    const state = createInitialState([a, b], [{ id: "p1" }, { id: "p2" }]);
     const mc = new MatchController(terrain, state);
 
-    // Each identical shot carves the mask in place, drifting the impact into the
-    // growing crater; re-seat the target on the current impact so every shot
-    // lands a damaging hit (the mechanic under test is "3 landing hits → armed").
-    function fireLandingShot1() {
-      const a = landingAim(shooter, SHOT_1);
-      const { impact } = simulateTrajectory(a, terrain);
-      if (!impact) throw new Error("aim stopped landing — adjust fixture");
-      target.x = impact.x;
-      target.y = impact.y;
-      mc.applyShot(a, SHOT_1);
-    }
-
     expect(mc.isSSArmed("p1")).toBe(false);
-    fireLandingShot1();
-    fireLandingShot1();
+    state.players[0].ssHitCharge = 2;
     expect(mc.isSSArmed("p1")).toBe(false);
-    fireLandingShot1();
+    state.players[0].ssHitCharge = 3;
     expect(mc.isSSArmed("p1")).toBe(true);
-
-    // Firing the Trojan resets the charge.
-    const trojanAim = buildShotInput({ mech: shooter, angleDeg: 30, power: 70, wind: 60, gravity: 300, def: TROJAN });
-    mc.applyShot(trojanAim, TROJAN);
+    // Firing the Trojan (server-side now) resets charge; isSSArmed reflects it.
+    state.players[0].ssHitCharge = 0;
     expect(mc.isSSArmed("p1")).toBe(false);
-    expect(state.players[0].ssHitCharge).toBe(0);
   });
 
-  it("Test F: previewTrajectory is non-empty and wind-reactive (PLAY-02)", () => {
+  it("Test F: previewTrajectory is non-empty and wind-reactive (PLAY-02, unchanged)", () => {
     const terrain = freshTerrain();
     const shooter = firingMech("p1");
     const state = createInitialState([shooter], [{ id: "p1" }]);
@@ -230,7 +228,7 @@ describe("MatchController seam", () => {
     expect(Math.abs(lastWind - lastNo)).toBeGreaterThan(1);
   });
 
-  it("rollWind stays within [WIN_MIN, WIN_MAX] with a seeded rng", () => {
+  it("rollWind stays within [WIN_MIN, WIN_MAX] with a seeded rng (unchanged)", () => {
     const terrain = freshTerrain();
     const state = createInitialState([firingMech("p1")], [{ id: "p1" }]);
     const mc = new MatchController(terrain, state);

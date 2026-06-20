@@ -1,112 +1,80 @@
-import {
-  simulateTrajectory,
-  resolveShot,
-  TerrainMask,
-} from "@shared/sim";
+import { simulateTrajectory, TerrainMask } from "@shared/sim";
 import type {
-  Carve,
-  Damage,
   ProjectileDef,
   ShotInput,
   TrajectoryPoint,
 } from "@shared/sim";
-import type { MatchState, PlayerState } from "./MatchState.js";
+import type { MatchState } from "./MatchState.js";
 import { SS_HITS_TO_ARM, WIND_MIN, WIND_MAX } from "./MatchState.js";
-import { expandFork, TROJAN } from "./loadout.js";
-import type { ShotResult } from "./shotResult.js";
 
 /**
  * THE SINGLE MANDATORY SEAM (ROADMAP success criterion 5) — Phase 2, plan 02.
  *
- * The only outcome-producing code path. Owns all local match state and the
- * frozen-sim calls; everything Phaser/animation routes through it. It is
- * Phaser-free (the ESLint guard on src/match/** enforces this) and fully
- * headless-testable.
+ * Owns the local hotseat match state + the frozen-sim aim preview; everything
+ * Phaser/animation routes through it. It is Phaser-free (the ESLint guard on
+ * src/match/** enforces this) and net-free (it receives a plain sender
+ * callback), so it stays fully headless-testable.
  *
- * PHASE 3 SWAP POINT: `applyShot` is the ONLY method whose body changes in
- * Phase 3 — local `resolveShot` becomes a server `shotResult` broadcast/listen.
- * The return shape ({@link ShotResult}) and every call site (the Scene calling
- * `applyShot` / `previewTrajectory` / `advanceTurn`) stay identical.
+ * PHASE 3: applyShot is now FIRE-AND-FORGET. It forwards the fired (aim, def) to
+ * the injected network sender and returns void. The outcome — HP, terrain
+ * carves, delay, SS-charge, turn advance, win — arrives later via the server
+ * `shotResult` broadcast and the synced MatchState, applied by MatchScene's
+ * broadcast/sync handlers. The local mutation that lived here is gone; the
+ * server is the sole authority (NET-01). The seam is preserved: MatchScene still
+ * calls controller.applyShot(); only its body and return type changed.
+ *
+ * advanceTurn / rollWind / checkWin / isSSArmed remain for type-compat and the
+ * VITE_NETWORKED=off hotseat dev loop, but are SUPERSEDED by synced state in
+ * networked play (the scene reads the broadcast MatchState instead of calling
+ * them). They are intentionally not deleted.
  */
 export class MatchController {
+  /**
+   * Injected network sender (Phase 3, Authority Decision 7). When set (networked
+   * mode), `applyShot` forwards the fired shot to it instead of resolving
+   * locally. Left undefined in the hotseat default — but in the hotseat path the
+   * scene no longer relies on applyShot's old local resolution either; hotseat
+   * keeps the Phase 2 controller behavior via the env-gated scene path.
+   */
+  private fireSender?: (aim: ShotInput, def: ProjectileDef) => void;
+
   constructor(
     private readonly terrain: TerrainMask,
     readonly state: MatchState,
   ) {}
 
   /**
+   * Inject the network sender (the scene wires this to net `sendFire`). Keeping
+   * the controller as the call site preserves the single seam: the scene still
+   * calls `applyShot`, which fire-and-forgets through this callback.
+   */
+  setFireSender(fn: (aim: ShotInput, def: ProjectileDef) => void): void {
+    this.fireSender = fn;
+  }
+
+  /**
    * Cosmetic aim preview (PLAY-02). Delegates to the frozen ballistics
    * integrator and returns just the path. Phase 3 keeps this IDENTICAL —
-   * trajectory preview is purely client-side.
+   * trajectory preview is purely client-side and is the ONLY remaining local-sim
+   * call site.
    */
   previewTrajectory(aim: ShotInput): TrajectoryPoint[] {
     return simulateTrajectory(aim, this.terrain).path;
   }
 
   /**
-   * Resolve a fired shot into a {@link ShotResult} AND apply its effects.
+   * FIRE-AND-FORGET (Phase 3 swap point). Forwards the fired (aim, def) to the
+   * injected network sender and returns void. It NO LONGER runs the local sim
+   * outcome resolver, mutates HP, carves the mask, ticks SS-charge, or
+   * accumulates delay — those are SERVER-authoritative (Plan 03). The outcome
+   * arrives later via the server `shotResult` broadcast + synced MatchState (NET-01).
    *
-   * THE SWAP POINT. Forks the aim client-side (research A1), animates the first
-   * sub-shot's arc as the visible primary, resolves every sub-shot against the
-   * shared mask, sums damage per-mech (mirrors the sim's sumPerMech so
-   * multi-carve damage combines rather than overwrites), mutates mech HP, ticks
-   * the SS hit-charge, and accumulates the def's turnDelay onto the active
-   * player. In Phase 3 the body is replaced by a server round-trip; the
-   * signature and return shape do not change.
+   * The seam is preserved: MatchScene still calls `controller.applyShot(aim, def)`;
+   * only this body and the return type changed (Authority Decision 7 / Agreed
+   * Concern #4 — the seam is NOT dead-ended into a direct scene→net call).
    */
-  applyShot(aim: ShotInput, def: ProjectileDef): ShotResult {
-    const subShots = expandFork(aim, def);
-
-    // The visible primary arc = the first sub-shot's flight.
-    const primary = simulateTrajectory(subShots[0], this.terrain);
-
-    const carves: Carve[] = [];
-    const damageTotals = new Map<string, number>();
-
-    for (const sub of subShots) {
-      const { carves: subCarves, damage: subDamage } = resolveShot(
-        sub,
-        this.terrain,
-        this.state.mechs,
-        sub.projectile,
-      );
-      carves.push(...subCarves);
-      for (const d of subDamage) {
-        damageTotals.set(d.mechId, (damageTotals.get(d.mechId) ?? 0) + d.amount);
-      }
-    }
-
-    const damage: Damage[] = [...damageTotals].map(([mechId, amount]) => ({
-      mechId,
-      amount,
-    }));
-
-    // Apply HP loss (PLAY-08), clamped at 0.
-    for (const d of damage) {
-      const mech = this.state.mechs.find((m) => m.id === d.mechId);
-      if (mech) mech.hp = Math.max(0, mech.hp - d.amount);
-    }
-
-    const active = this.activePlayer();
-
-    // SS hit-charge: any damage landed counts as one hit (capped at the arm
-    // threshold). Firing the Trojan consumes the charge.
-    if (damage.length > 0) {
-      active.ssHitCharge = Math.min(SS_HITS_TO_ARM, active.ssHitCharge + 1);
-    }
-    if (def.id === TROJAN.id) {
-      active.ssHitCharge = 0;
-    }
-
-    // Delay queue (PLAY-06): firing accumulates the def's tempo cost.
-    active.accumulatedDelay += def.turnDelay;
-
-    return {
-      path: primary.path,
-      impact: primary.impact,
-      carves,
-      damage,
-    };
+  applyShot(aim: ShotInput, def: ProjectileDef): void {
+    this.fireSender?.(aim, def);
   }
 
   /**
@@ -145,13 +113,5 @@ export class MatchController {
   checkWin(): string | null {
     const alive = this.state.mechs.filter((m) => m.hp > 0);
     return alive.length === 1 ? alive[0].id : null;
-  }
-
-  private activePlayer(): PlayerState {
-    const p = this.state.players.find(
-      (pl) => pl.id === this.state.activePlayerId,
-    );
-    if (!p) throw new Error(`active player ${this.state.activePlayerId} not found`);
-    return p;
   }
 }

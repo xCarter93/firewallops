@@ -11,6 +11,7 @@ import type { PlayerState } from "../match/MatchState.js";
 import { buildShotInput } from "../match/aim.js";
 import { LOADOUT } from "../match/loadout.js";
 import type { ShotId } from "../match/loadout.js";
+import type { ShotResult } from "../match/shotResult.js";
 import { MechView } from "../view/MechView.js";
 import { AimView } from "../view/AimView.js";
 import { TerrainView } from "../view/TerrainView.js";
@@ -18,6 +19,9 @@ import { ProjectileView } from "../view/ProjectileView.js";
 import { Fx } from "../view/Fx.js";
 import { Hud } from "../view/Hud.js";
 import type { MatchSceneData } from "./BootScene.js";
+import { connectToMatch, sendAim, sendFire } from "../net/room.js";
+import { ShotResultBridge } from "../net/shotResultBridge.js";
+import type { Room } from "@colyseus/sdk";
 import {
   MAP,
   P1_ID,
@@ -29,19 +33,28 @@ import {
 } from "../world.js";
 
 /**
- * Match scene (Phase 2, plan 04) — the complete hotseat loop + juice + HUD.
+ * Match scene (Phase 2, plan 04 + Phase 3, plan 04) — hotseat loop + networked
+ * authority client.
  *
- * Plan 03 captured ALL aim input (angle/walk/power/shot-select) and drew the
- * world + previews. Plan 04 adds the FIRE flow: releasing Space fires through
- * THE SEAM (`controller.applyShot`), animates the dot along `result.path` with a
- * follow-cam, then on impact carves the visual terrain, fires explosion + shake
- * + floating damage, advances the delay queue, pans to the next mech, rerolls
- * wind, and ends the match on last-mech-standing with an R rematch.
+ * HOTSEAT (VITE_NETWORKED off — the Phase 2 DEFAULT dev loop, unchanged): the
+ * complete local loop + juice + HUD. Firing routes through THE SEAM
+ * (`controller.applyShot`), animates along `result.path`, then on impact carves
+ * the visual terrain, fires FX, advances the local delay queue (`afterImpact`),
+ * rerolls wind, and ends on last-mech-standing with an R rematch.
+ *
+ * NETWORKED (VITE_NETWORKED=1 — Phase 3 / Authority Decision 6, opt-in): the
+ * client connects to the Colyseus room and becomes a pure broadcast mirror. HP
+ * and terrain mutate ONLY when the server `shotResult` broadcast arrives (via
+ * `animateShot`, the single mutation source). Active player, wind, HP, terrain,
+ * and ALL phase transitions come ONLY from `syncFromState`. `applyShot` is
+ * fire-and-forget (the controller forwards to the injected `sendFire`); the
+ * local turn/wind/win machine (`afterImpact`) is DEAD in this mode. Input is
+ * gated on synced AIMING + sessionId + `isAnimatingShot`.
  *
  * SEAM INVARIANT (threats T-02-07/T-02-08): this Scene NEVER imports the sim's
- * outcome functions (resolveShot/simulateTrajectory/quantizeCarve) — it consumes
- * only the `ShotResult` returned by applyShot. A `firing`/`RESOLVING` gate stops
- * a turn firing or advancing twice.
+ * outcome functions (resolveShot/simulateTrajectory/quantizeCarve). The local
+ * preview is the only local-sim use, and it routes through
+ * `controller.previewTrajectory`.
  */
 
 // --- Input tuning rates (recorded in the SUMMARY) ---
@@ -58,21 +71,49 @@ const PAN_MS = 500; // frame-next-mech camera pan (UI-SPEC max)
 const MAX_SHAKE_MS = 300;
 const SHAKE_PER_DAMAGE = 0.0006; // shake amplitude per HP of total damage
 
+// --- Networked aim streaming (Phase 3) ---
+const AIM_THROTTLE_MS = 100; // max one aim message per ~100ms (Suggestion #8)
+// Local mirror of the server TURN_MS (server config.ts). Used ONLY for the
+// minimal countdown anchor — the server is the real timeout authority. Drift of
+// ~RTT is acceptable this phase (no server-time offset; CONTEXT minimal-countdown).
+const TURN_MS_LOCAL = 20_000;
+
 // --- Camera framing (CAM-02). The active mech is framed in the LOWER THIRD of
 // the viewport so it clears the bottom bar and leaves the bulk of the screen as
 // sky/arc room above. ---
 const BAR_CLEARANCE = 96; // bottom-bar height to clear (matches plan 03 BAR_H = 96)
-// The mech is framed at this fraction DOWN the viewport (0=top, 1=bottom).
-// `centerOn(x, y)` puts world-y `y` at viewport center (0.5), so the framing
-// offset is `(FRAME_FRAC − 0.5) * cam.height` — proportional to the live
-// viewport so it works at any window height (the canvas now fills the window).
 const FRAME_FRAC = 0.66;
-// Sky headroom: how far the camera bounds extend ABOVE the world top (y<0) so
-// the follow-cam can chase a steep arc up into the sky (the dark backgroundColor
-// fills y<0 — there is no terrain up there). setBounds clamps panning to this.
 const SKY_HEADROOM = 640;
 
 type Phase = "AIM" | "RESOLVING" | "OVER";
+
+/** The synced Mobile shape the scene reads (server schema, read-only mirror). */
+interface SyncedMobile {
+  sessionId: string;
+  team: number;
+  x: number;
+  y: number;
+  hp: number;
+  angleDeg: number;
+  power: number;
+  facing: number;
+  ssHitCharge: number;
+  accumulatedDelay: number;
+  selectedItemId: string;
+}
+
+/** The synced MatchState shape the scene reads. */
+interface SyncedState {
+  phase: string;
+  activePlayer: string;
+  wind: number;
+  turnEndsAt: number;
+  winnerTeam: number;
+  mobiles: {
+    forEach(cb: (mobile: SyncedMobile, key: string) => void): void;
+    size: number;
+  };
+}
 
 export class MatchScene extends Phaser.Scene {
   private mask!: MatchSceneData["mask"];
@@ -96,10 +137,32 @@ export class MatchScene extends Phaser.Scene {
   private dragStartPower = 0;
   private selectedShotId: ShotId = "shot-1";
 
-  // Right-drag free-pan latch (CAM-01): set true on a manual right-drag pan so
-  // the AIM-phase auto-frame (guarded by `!manualPan`) stops yanking the camera
-  // back. Cleared by initial framing, C-recenter, fire, turn-start, and rematch.
+  // Right-drag free-pan latch (CAM-01).
   private manualPan = false;
+
+  // --- Networked state (Phase 3) ---
+  private networked = false;
+  private room?: Room;
+  private sessionId = "";
+  private syncedPhase = "WAITING";
+  private activePlayerId = "";
+  private isAnimatingShot = false;
+  private lastAimSentAt = 0;
+  // Latest synced absolute HP per sessionId (the authoritative reconcile source).
+  private syncedHp: Record<string, number> = {};
+  // Latest synced SS-charge for the LOCAL player (gates Trojan selection; the
+  // server is the real arming authority and rejects an unearned Trojan).
+  private localSsCharge = 0;
+  // A terrain snapshot that arrived mid-animation is queued, applied on land.
+  private pendingTerrain?: TerrainMask;
+  private syncedWind = 0;
+  private turnEndsAt = 0;
+  // Local countdown anchor: the game-time ms at which the current turn expires.
+  // Re-anchored whenever the server's turnEndsAt value changes (a new turn).
+  private localTurnDeadline = 0;
+  private lastTurnEndsAt = -1;
+  // One-shot initial camera framing once the local mech first appears in state.
+  private framedOnLocal = false;
 
   // Input handles.
   private cursors!: Phaser.Types.Input.Keyboard.CursorKeys;
@@ -116,23 +179,25 @@ export class MatchScene extends Phaser.Scene {
 
   create(data: MatchSceneData): void {
     this.mask = data.mask;
-    // Build the cosmetic terrain HERE (not in BootScene) so the world Image is
-    // on THIS scene's display list — a BootScene-owned image is destroyed when
-    // BootScene shuts down on scene.start, which is why the terrain was
-    // invisible. Built first so mechs/aim/FX layer on top of it.
     this.terrain = TerrainView.build(this, this.mask);
 
-    this.buildMatch();
+    // Boot mode flag (Authority Decision 6): networked is opt-in; hotseat is the
+    // DEFAULT dev loop. `VITE_NETWORKED=1 pnpm --filter @firewallops/client dev`
+    // starts networked mode.
+    const flag = import.meta.env.VITE_NETWORKED;
+    this.networked = flag === "1" || flag === "true";
 
-    this.aimView = new AimView(this);
-    this.fx = new Fx(this);
-    this.hud = new Hud(this, [P1_ID, P2_ID]);
+    if (this.networked) {
+      this.createNetworked();
+    } else {
+      this.createHotseat();
+    }
+  }
 
-    // Camera: bound to the world (wider than the viewport) plus SKY_HEADROOM of
-    // negative-y room ABOVE the world top so a steep arc can be followed up into
-    // the sky (dark background — no terrain there) instead of clipping at y=0.
-    // The world is now deep enough (MAP.height) that the bottom never reveals
-    // background below the ground in a full-window viewport.
+  // ───────────────────────────── shared scene setup ─────────────────────────────
+
+  /** Camera bounds + keyboard/mouse input + resize/contextmenu listeners. */
+  private setupCommon(): void {
     this.cameras.main.setBounds(
       0,
       -SKY_HEADROOM,
@@ -140,7 +205,6 @@ export class MatchScene extends Phaser.Scene {
       MAP.height + SKY_HEADROOM,
     );
 
-    // --- Input registration ---
     const kb = this.input.keyboard;
     if (!kb) throw new Error("MatchScene requires a keyboard input plugin");
     this.cursors = kb.createCursorKeys();
@@ -151,10 +215,6 @@ export class MatchScene extends Phaser.Scene {
     this.keyR = kb.addKey(Phaser.Input.Keyboard.KeyCodes.R);
     this.keyC = kb.addKey(Phaser.Input.Keyboard.KeyCodes.C);
 
-    // Mouse-drag power (precise) on the same 0-100 scale as the gauge. Gated on
-    // an EXPLICIT left-button press (Open Q3): a right/middle/ambiguous press
-    // never starts a power drag, so left-drag power and right-drag pan are
-    // mutually exclusive by button (Pitfall 2).
     this.input.on("pointerdown", (p: Phaser.Input.Pointer) => {
       if (this.phase !== "AIM") return;
       if (!p.leftButtonDown()) return;
@@ -166,10 +226,6 @@ export class MatchScene extends Phaser.Scene {
       this.dragMode = false;
     });
 
-    // Right-drag free pan (CAM-01): scroll the camera by the INVERSE pointer
-    // delta so the world tracks the cursor 1:1. setBounds (above) auto-clamps
-    // scroll to the world edges, so no manual clamp is needed. Sets the
-    // manualPan latch so the AIM auto-frame leaves the manual pan alone.
     this.input.on("pointermove", (p: Phaser.Input.Pointer) => {
       if (!p.rightButtonDown()) return;
       const cam = this.cameras.main;
@@ -178,50 +234,36 @@ export class MatchScene extends Phaser.Scene {
       this.manualPan = true;
     });
 
-    // Suppress the browser context menu so right-drag is usable (Pitfall 4), and
-    // tear the listener down on scene shutdown so it never accumulates across
-    // scene restarts (reviewer concern #8 — no leaked listener).
     const onContextMenu = (e: Event) => e.preventDefault();
     this.game.canvas.addEventListener("contextmenu", onContextMenu);
     this.events.once(Phaser.Scenes.Events.SHUTDOWN, () =>
       this.game.canvas.removeEventListener("contextmenu", onContextMenu),
     );
 
-    // RESPONSIVE VIEWPORT (Scale.RESIZE): the canvas fills the window and the
-    // final viewport height settles AFTER this scene builds, and again whenever
-    // the user resizes the window. Re-pin the cameras + HUD and re-frame so the
-    // bottom bar tracks the true window bottom (otherwise it clips / floats).
     this.scale.on(Phaser.Scale.Events.RESIZE, this.onResize, this);
     this.events.once(Phaser.Scenes.Events.SHUTDOWN, () =>
       this.scale.off(Phaser.Scale.Events.RESIZE, this.onResize, this),
     );
+  }
 
-    // INITIAL FRAMING (concern #4): frame the active mech ABOVE the bottom bar
-    // on match start — without this the camera opens at scroll (0,0) on the
-    // world's top-left quadrant. Instant (animate: false) for the opening frame.
+  // ───────────────────────────── hotseat (Phase 2 default) ─────────────────────────────
+
+  private createHotseat(): void {
+    this.buildMatch();
+
+    this.aimView = new AimView(this);
+    this.fx = new Fx(this);
+    this.hud = new Hud(this, [P1_ID, P2_ID]);
+
+    this.setupCommon();
+
     this.frameOnMech(this.activeMech(), false);
     this.manualPan = false;
   }
 
   /**
-   * Scale RESIZE handler: re-size the cameras to the new viewport, reflow the
-   * HUD to the new window bottom, and re-frame the active mech. Guarded so a
-   * RESIZE that fires before the match is fully built is a no-op.
-   */
-  private onResize(gameSize: Phaser.Structs.Size): void {
-    if (!this.hud) return;
-    this.cameras.resize(gameSize.width, gameSize.height);
-    this.hud.resize(gameSize.width, gameSize.height);
-    if (this.phase !== "OVER") {
-      this.frameOnMech(this.activeMech(), false);
-      this.manualPan = false;
-    }
-  }
-
-  /**
-   * Build (or rebuild) the live match state, controller, mech models + views.
-   * Reseats both mechs on the current mask surface and frames P1. Shared by
-   * create() and the R rematch.
+   * Build (or rebuild) the LOCAL hotseat match state, controller, mech models +
+   * views. NETWORKED mode never calls this — its mechs come from syncFromState.
    */
   private buildMatch(): void {
     const { height } = this.mask;
@@ -236,9 +278,6 @@ export class MatchScene extends Phaser.Scene {
       { id: P2_ID, x: P2_START_X, y: p2y, hp: 100 },
     ];
 
-    // Facing (02-04 NO-GO fix 2): initial facing points toward the opponent /
-    // map center — P1 (left) faces right (+1), P2 (right) faces left (-1) — so
-    // P2 can aim left at P1 from the very first turn.
     const state = createInitialState(this.mechs, [
       { id: P1_ID, facing: 1 },
       { id: P2_ID, facing: -1 },
@@ -254,12 +293,8 @@ export class MatchScene extends Phaser.Scene {
     this.mechViews[P2_ID].setActive(false);
     this.mechViews[P1_ID].setFacing(1);
     this.mechViews[P2_ID].setFacing(-1);
-    // MATCH START — initialize the floating HP for BOTH players (also covers the
-    // rematch path, which routes through buildMatch) so the opening state shows
-    // 100/100. Explicit player ids guarantee both are seeded.
     this.mechViews[P1_ID].setHp(this.mechs[0].hp);
     this.mechViews[P2_ID].setHp(this.mechs[1].hp);
-    // Barrel uses the ABSOLUTE angle (relative angle through the active facing).
     this.mechViews[P1_ID].setBarrelAngle(this.absoluteAngle(1));
     this.mechViews[P2_ID].setBarrelAngle(this.absoluteAngle(-1));
 
@@ -269,17 +304,455 @@ export class MatchScene extends Phaser.Scene {
     this.selectedShotId = "shot-1";
   }
 
+  // ───────────────────────────── networked (Phase 3) ─────────────────────────────
+
+  /**
+   * Networked boot: build the cosmetic shells, wire the input, connect to the
+   * Colyseus room, and let `syncFromState` drive everything. The local mechs map
+   * starts empty and is populated by the first state patch (no P1/P2 seeding).
+   */
+  private createNetworked(): void {
+    this.aimView = new AimView(this);
+    this.fx = new Fx(this);
+    // Up to 8 mobiles (team scope) — pre-create that many HUD turn rows.
+    this.hud = new Hud(this, ["", "", "", "", "", "", "", ""]);
+
+    this.mechViews = {};
+    this.mechs = [];
+
+    // A minimal LOCAL controller so previewTrajectory still works for the aim
+    // line. Its state is unused for outcomes (server-authoritative); we inject
+    // the fire sender so applyShot forwards to the net layer (seam stays live).
+    const localState = createInitialState(
+      [{ id: "local", x: 0, y: 0, hp: 100 }],
+      [{ id: "local", facing: 1 }],
+    );
+    this.controller = new MatchController(this.mask, localState);
+
+    this.setupCommon();
+
+    this.phase = "AIM";
+    this.selectedShotId = "shot-1";
+    this.hud.clearIntro();
+
+    // The bridge is the single mutation source: server shotResult → animateShot.
+    const bridge = new ShotResultBridge(this);
+
+    void connectToMatch({
+      onShotResult: bridge.onShotResult,
+      onTerrainSnapshot: (mask) => this.rebuildTerrain(mask),
+      onMatchEnded: (winnerTeam, draw) => this.onMatchEnded(winnerTeam, draw),
+      onStateChange: (s) => this.syncFromState(s as SyncedState),
+    })
+      .then((room) => {
+        this.room = room;
+        this.sessionId = room.sessionId;
+        // Inject the fire sender so applyShot forwards the ABSOLUTE sim angle
+        // (the server schema validates 0..180). The seam stays live: the scene
+        // still calls controller.applyShot; the controller forwards here.
+        this.controller.setFireSender((aim) =>
+          sendFire(this.room!, aim.angleDeg, aim.power, this.selectedShotId),
+        );
+      })
+      .catch((err: unknown) => {
+        console.error("[net] failed to join match", err);
+      });
+  }
+
+  /**
+   * onStateChange handler (Phase 3) — the SOLE driver of turn/wind/HP/phase in
+   * networked mode. Maps the server phase enum to the local input gate, drives
+   * up-to-8 MechViews from the synced mobiles (team color + facing + barrel +
+   * active outline), and updates the HUD. HP is NOT applied eagerly mid-shot —
+   * it is stored and reconciled to the absolute on animation-land (Agreed
+   * Concern #2). NO P1/P2 hardcoding — mobiles are keyed by sessionId.
+   */
+  private syncFromState(state: SyncedState): void {
+    // Map the server enum → local gate (do NOT reuse the old local "AIM" literal).
+    this.syncedPhase = state.phase;
+    this.activePlayerId = state.activePlayer;
+    this.syncedWind = state.wind;
+    this.turnEndsAt = state.turnEndsAt;
+
+    // Re-anchor the local countdown deadline whenever the server posts a NEW
+    // turnEndsAt (a fresh turn). We assume a full TURN_MS window remains (no
+    // server-time offset this phase) — drift ~RTT is acceptable.
+    if (state.turnEndsAt !== this.lastTurnEndsAt) {
+      this.lastTurnEndsAt = state.turnEndsAt;
+      this.localTurnDeadline = this.game.getTime() + TURN_MS_LOCAL;
+    }
+
+    let activeMobile: SyncedMobile | undefined;
+    const ordered: { sessionId: string; team: number; accumulatedDelay: number }[] = [];
+
+    state.mobiles.forEach((mobile, key) => {
+      const id = mobile.sessionId || key;
+      this.syncedHp[id] = mobile.hp;
+      ordered.push({
+        sessionId: id,
+        team: mobile.team,
+        accumulatedDelay: mobile.accumulatedDelay,
+      });
+
+      // Create a MechView for a new mobile (late joiner / second tab).
+      let view = this.mechViews[id];
+      if (!view) {
+        view = new MechView(this, mobile.x, mobile.y);
+        this.mechViews[id] = view;
+        view.setTeamColor(mobile.team);
+        // Track a lightweight local mech record for FX float-damage anchoring.
+        this.mechs.push({ id, x: mobile.x, y: mobile.y, hp: mobile.hp });
+      }
+
+      // Position, facing, barrel (the spectator barrel render snaps to the
+      // server's ABSOLUTE angle), and the active outline.
+      view.setPosition(mobile.x, mobile.y);
+      view.setFacing(mobile.facing >= 0 ? 1 : -1);
+      view.setBarrelAngle(mobile.angleDeg);
+      view.setActive(id === state.activePlayer);
+      view.setTeamColor(mobile.team);
+
+      // Keep the local mech record's position in sync (FX anchors read it).
+      const rec = this.mechs.find((m) => m.id === id);
+      if (rec) {
+        rec.x = mobile.x;
+        rec.y = mobile.y;
+      }
+
+      // Apply HP immediately ONLY in steady state — never mid-animation (a
+      // schema patch must not drop HP before the shotResult animation lands).
+      if (!this.isAnimatingShot) {
+        view.setHp(mobile.hp);
+        if (rec) rec.hp = mobile.hp;
+      }
+
+      if (id === state.activePlayer) activeMobile = mobile;
+      if (id === this.sessionId) this.localSsCharge = mobile.ssHitCharge;
+    });
+
+    // HUD: wind, the active player's SS-charge + armed, the power meter, and the
+    // N-mobile turn list (ordered by accumulatedDelay — act-next-first).
+    ordered.sort((a, b) => a.accumulatedDelay - b.accumulatedDelay);
+    const turnRows = ordered.map((o, i) => ({
+      label: this.teamLabel(o.team, o.sessionId),
+      isNext: i === 0,
+    }));
+    const charge = activeMobile?.ssHitCharge ?? 0;
+    const armed = charge >= 3;
+    this.hud.updateNetworked({
+      wind: state.wind,
+      ssHitCharge: charge,
+      armed,
+      power: this.power,
+      selectedShotId: this.selectedShotId,
+      turnRows,
+      dtMs: 0,
+    });
+
+    // One-shot: frame the camera on the local mech the first time it appears.
+    if (!this.framedOnLocal) {
+      const view = this.localMechView();
+      if (view) {
+        this.framedOnLocal = true;
+        this.frameOnMech({ id: this.sessionId, x: view.x, y: view.y, hp: 0 }, false);
+        this.manualPan = false;
+      }
+    }
+  }
+
+  /** A short turn-list label for a mobile: team letter + a session suffix. */
+  private teamLabel(team: number, sessionId: string): string {
+    const t = team === 0 ? "A" : "B";
+    const me = sessionId === this.sessionId ? "*" : "";
+    return `TEAM ${t}${me} ${sessionId.slice(0, 4)}`;
+  }
+
+  /**
+   * The SINGLE mutation source (ShotAnimationSink contract). Runs the existing
+   * animation body from the SERVER shotResult: animate the dot, carve the LOCAL
+   * visual mask from `result.carves` (the server integer carves — never
+   * re-rounded), repaint, FX, float damage, and reconcile HP to the synced
+   * absolute on land (NOT `damage` as a delta). Sets `isAnimatingShot` so input
+   * is blocked through the animation regardless of the synced phase.
+   */
+  animateShot(result: ShotResult): void {
+    this.isAnimatingShot = true;
+    this.phase = "RESOLVING";
+
+    const totalDamage = result.damage.reduce((s, d) => s + d.amount, 0);
+
+    const projectile = new ProjectileView(this);
+    const cam = this.cameras.main;
+    cam.startFollow(projectile.sprite, false, FOLLOW_LERP, FOLLOW_LERP);
+
+    projectile.animateAlong(result.path, () => {
+      cam.stopFollow();
+
+      const impact = result.impact ?? result.path[result.path.length - 1] ?? null;
+
+      // Carve the LOCAL visual mask from the server's integer carves verbatim
+      // (NET-05) — carveCircle is a TerrainMask method, NOT a banned outcome fn.
+      for (const c of result.carves) {
+        this.mask.carveCircle(c.cx, c.cy, c.r);
+      }
+      this.terrain.repaintFromMask(this.mask);
+
+      if (impact) {
+        // blastRadius for the FX ring: use the largest carve radius as a proxy.
+        const blastRadius =
+          result.carves.reduce((max, c) => Math.max(max, c.r), 0) || 24;
+        this.fx.explode(impact, blastRadius);
+        const intensity = Math.min(0.02, totalDamage * SHAKE_PER_DAMAGE);
+        this.fx.shake(MAX_SHAKE_MS, intensity);
+      }
+
+      // Floating damage numbers (result.damage positions them — NEVER HP).
+      this.fx.floatDamage(result.damage, (mechId) => {
+        const m = this.mechs.find((mm) => mm.id === mechId);
+        return m ? { x: m.x, y: m.y } : null;
+      });
+
+      // End of animation: HP is reconciled to the synced ABSOLUTE (Agreed
+      // Concern #2) — never `setHp(currentHp - damage)`.
+      this.isAnimatingShot = false;
+      this.applyHpFromState();
+
+      // A terrain snapshot that arrived mid-animation is applied now (race-safe).
+      if (this.pendingTerrain) {
+        const mask = this.pendingTerrain;
+        this.pendingTerrain = undefined;
+        this.rebuildTerrain(mask);
+      }
+    });
+  }
+
+  /**
+   * Reconcile every MechView's visual HP to the LATEST synced schema absolute
+   * (the authoritative value), called when an animation lands. NEVER subtracts a
+   * delta — the server hp is the truth (Agreed Concern #2 / Authority Decision 2).
+   */
+  private applyHpFromState(): void {
+    for (const [id, view] of Object.entries(this.mechViews)) {
+      const hp = this.syncedHp[id];
+      if (hp === undefined) continue;
+      view.setHp(hp);
+      const rec = this.mechs.find((m) => m.id === id);
+      if (rec) rec.hp = hp;
+    }
+  }
+
+  /**
+   * Rebuild the visual terrain from a decoded RLE snapshot (NET-05 / NET-06).
+   * Replaces the local mask and rebuilds the TerrainView. A snapshot arriving
+   * mid-animation is QUEUED (applied on land) so it never races an in-flight shot.
+   */
+  private rebuildTerrain(mask: TerrainMask): void {
+    if (this.isAnimatingShot) {
+      this.pendingTerrain = mask;
+      return;
+    }
+    this.mask = mask;
+    this.terrain.destroy();
+    this.terrain = TerrainView.build(this, this.mask);
+  }
+
+  /**
+   * Team-or-draw match end (Cursor MEDIUM). Deactivates ALL MechViews by
+   * iterating the views map (no [P1_ID, P2_ID] loop), and shows the banner. The
+   * draw case maps to the server's `endMatchDraw` (winnerTeam -1, draw true).
+   * R-rematch is NOT bound in networked mode — reload/rejoin to replay (Phase 6).
+   */
+  private onMatchEnded(winnerTeam: number, draw: boolean): void {
+    this.phase = "OVER";
+    this.syncedPhase = "RESULTS";
+    for (const view of Object.values(this.mechViews)) view.setActive(false);
+    const text = draw ? "DRAW" : `TEAM ${winnerTeam === 0 ? "A" : "B"} WINS`;
+    this.hud.showResultBanner(text);
+  }
+
+  /** Networked input gate: local + active + AIMING + not animating. */
+  private isLocalActiveAndAiming(): boolean {
+    return (
+      this.syncedPhase === "AIMING" &&
+      this.sessionId === this.activePlayerId &&
+      this.sessionId !== "" &&
+      !this.isAnimatingShot
+    );
+  }
+
+  /** The local player's own synced mobile (for aim preview origin + facing). */
+  private localMechView(): MechView | undefined {
+    return this.mechViews[this.sessionId];
+  }
+
+  // ───────────────────────────── shared update ─────────────────────────────
+
+  private onResize(gameSize: Phaser.Structs.Size): void {
+    if (!this.hud) return;
+    this.cameras.resize(gameSize.width, gameSize.height);
+    this.hud.resize(gameSize.width, gameSize.height);
+    if (this.networked) {
+      const view = this.localMechView();
+      if (view && this.phase !== "OVER") {
+        this.frameOnMech({ id: this.sessionId, x: view.x, y: view.y, hp: 0 }, false);
+        this.manualPan = false;
+      }
+      return;
+    }
+    if (this.phase !== "OVER") {
+      this.frameOnMech(this.activeMech(), false);
+      this.manualPan = false;
+    }
+  }
+
   update(_t: number, dtMs: number): void {
+    if (this.networked) {
+      this.updateNetworked(dtMs);
+      return;
+    }
+    this.updateHotseat(dtMs);
+  }
+
+  // ───────────────────────────── networked update ─────────────────────────────
+
+  private updateNetworked(dtMs: number): void {
+    // Minimal countdown (NET-04): seconds until the local deadline anchored off
+    // the server's turnEndsAt. The server is the real timeout authority; this is
+    // a cosmetic readout that may drift ~RTT (CONTEXT minimal-countdown).
+    if (this.room && this.syncedPhase === "AIMING") {
+      const secs = (this.localTurnDeadline - this.game.getTime()) / 1000;
+      this.hud.setCountdown(secs);
+    } else {
+      this.hud.hideCountdown();
+    }
+
+    const canInput = this.isLocalActiveAndAiming();
+    const view = this.localMechView();
+
+    if (canInput && view) {
+      const dt = dtMs / 1000;
+
+      // Angle (0-90 relative; absolute via local facing approximation +1).
+      if (this.cursors.up.isDown) {
+        this.angleDeg = Math.min(90, this.angleDeg + ANGLE_RATE * dt);
+      }
+      if (this.cursors.down.isDown) {
+        this.angleDeg = Math.max(0, this.angleDeg - ANGLE_RATE * dt);
+      }
+
+      // Power gauge: release FIRES.
+      if (Phaser.Input.Keyboard.JustDown(this.space)) {
+        this.power = 0;
+        this.charging = true;
+      }
+      if (this.charging && this.space.isDown) {
+        this.power = Math.min(100, this.power + SWEEP_RATE * dt);
+      }
+      if (Phaser.Input.Keyboard.JustUp(this.space)) {
+        this.charging = false;
+        if (this.power > 0) {
+          this.fireNetworked(view);
+          return;
+        }
+      }
+
+      // Mouse-drag power.
+      if (this.dragMode && this.input.activePointer.isDown) {
+        const delta = (this.input.activePointer.x - this.dragStartX) * DRAG_SENSITIVITY;
+        this.power = Phaser.Math.Clamp(this.dragStartPower + delta, 0, 100);
+      }
+
+      // Shot select (Trojan only when the synced charge is armed).
+      if (Phaser.Input.Keyboard.JustDown(this.key1)) this.selectedShotId = "shot-1";
+      if (Phaser.Input.Keyboard.JustDown(this.key2)) this.selectedShotId = "shot-2";
+      if (Phaser.Input.Keyboard.JustDown(this.key3)) {
+        // Arming is server-validated; gate the local selection on the synced
+        // SS-charge so the chip cannot be picked before it is earned.
+        if (this.localSsCharge >= 3) {
+          this.selectedShotId = "trojan";
+        }
+      }
+
+      // Aim preview (local cosmetic, ONLY for the local active player). Drive the
+      // local barrel + arc from the absolute angle.
+      const absAngle = this.absoluteAngle(1);
+      view.setBarrelAngle(absAngle);
+      const muzzle = view.getMuzzle();
+      this.aimView.drawLaunchIndicator(muzzle, absAngle, this.power, this.syncedWind);
+      this.aimView.drawDevArc({
+        controller: this.controller,
+        mech: { id: this.sessionId, x: view.x, y: view.y, hp: 100 },
+        angleDeg: absAngle,
+        power: this.power,
+        wind: this.syncedWind,
+        gravity: GRAVITY,
+        selectedShotId: this.selectedShotId,
+      });
+
+      // Throttled aim streaming (~100ms); committed=false during the hold.
+      const now = this.game.getTime();
+      if (now - this.lastAimSentAt >= AIM_THROTTLE_MS && this.room) {
+        sendAim(this.room, absAngle, this.power, false);
+        this.lastAimSentAt = now;
+      }
+    } else {
+      // Not our turn / mid-animation: clear the local aim overlays so no ghost
+      // arc shows for a spectator (opponents see barrel-angle only).
+      this.aimView.clear();
+    }
+
+    // C recenter.
+    if (Phaser.Input.Keyboard.JustDown(this.keyC) && view) {
+      this.frameOnMech({ id: this.sessionId, x: view.x, y: view.y, hp: 0 }, true);
+      this.manualPan = false;
+    }
+  }
+
+  /**
+   * Fire in networked mode through THE SEAM. The controller forwards (aim, def)
+   * to the injected sendFire — fire-and-forget. We send `committed: true` first
+   * so the server locks power precisely, then call applyShot. We do NOT animate
+   * here — the broadcast `animateShot` owns the animation.
+   */
+  private fireNetworked(view: MechView): void {
+    this.hud.clearIntro();
+    const def = LOADOUT[this.selectedShotId];
+
+    const muzzle = view.getMuzzle();
+    const aim = buildShotInput({
+      mech: { id: this.sessionId, x: view.x, y: view.y, hp: 100 },
+      angleDeg: this.angleDeg,
+      power: this.power,
+      wind: this.syncedWind,
+      gravity: GRAVITY,
+      def,
+      facing: 1,
+    });
+    aim.x = muzzle.x;
+    aim.y = muzzle.y;
+
+    // Commit power precisely (Agreed Concern #6) before the fire intent.
+    if (this.room) sendAim(this.room, aim.angleDeg, this.power, true);
+
+    // THE SEAM CALL — fire-and-forget to the injected net sender.
+    this.controller.applyShot(aim, def);
+
+    this.power = 0;
+    this.charging = false;
+    this.aimView.clear();
+  }
+
+  // ───────────────────────────── hotseat update (Phase 2, unchanged) ─────────────────────────────
+
+  private updateHotseat(dtMs: number): void {
     const dt = dtMs / 1000;
 
-    // Rematch is available at any time the match is OVER.
     if (this.phase === "OVER") {
       if (Phaser.Input.Keyboard.JustDown(this.keyR)) this.rematch();
       this.hud.update(this.controller.state, this.controller, this.selectedShotId, dtMs, this.power);
       return;
     }
 
-    // While the shot resolves, ignore all aim/move/fire input (threat T-02-08).
     if (this.phase === "RESOLVING") {
       this.hud.update(this.controller.state, this.controller, this.selectedShotId, dtMs, this.power);
       return;
@@ -289,7 +762,6 @@ export class MatchScene extends Phaser.Scene {
     const activeView = this.mechViews[active.id];
     const activePlayer = this.activePlayerState();
 
-    // --- Angle (PLAY-01): the on-screen aim stays 0-90 RELATIVE to facing ---
     if (this.cursors.up.isDown) {
       this.angleDeg = Math.min(90, this.angleDeg + ANGLE_RATE * dt);
     }
@@ -297,9 +769,6 @@ export class MatchScene extends Phaser.Scene {
       this.angleDeg = Math.max(0, this.angleDeg - ANGLE_RATE * dt);
     }
 
-    // --- Move (budget-limited walk, blocked by steep walls). Pressing a
-    // direction also FACES that way (02-04 NO-GO fix 2) so "move left → aim
-    // left", independent of whether the walk itself is allowed. ---
     if (this.cursors.left.isDown) {
       this.setActiveFacing(activePlayer, activeView, -1);
       this.tryWalk(active, activeView, -1, dt);
@@ -309,10 +778,8 @@ export class MatchScene extends Phaser.Scene {
       this.tryWalk(active, activeView, 1, dt);
     }
 
-    // Barrel points along the ABSOLUTE angle (relative aim × current facing).
     activeView.setBarrelAngle(this.absoluteAngle(activePlayer.facing));
 
-    // --- Power gauge: single-sweep, release FIRES (Pitfall 4: release-to-fire) ---
     if (Phaser.Input.Keyboard.JustDown(this.space)) {
       this.power = 0;
       this.charging = true;
@@ -324,29 +791,22 @@ export class MatchScene extends Phaser.Scene {
       this.charging = false;
       if (this.power > 0) {
         this.fire(active, activeView);
-        return; // entered RESOLVING; skip the rest of this frame.
+        return;
       }
     }
 
-    // --- Mouse-drag power (precise) ---
     if (this.dragMode && this.input.activePointer.isDown) {
       const delta = (this.input.activePointer.x - this.dragStartX) * DRAG_SENSITIVITY;
       this.power = Phaser.Math.Clamp(this.dragStartPower + delta, 0, 100);
     }
 
-    // --- C recenter (manual override): pan back to the active mech, framed
-    // above the bar, and clear the latch (UI-SPEC: "Overrides a manual pan"). ---
     if (Phaser.Input.Keyboard.JustDown(this.keyC)) {
       this.frameOnMech(this.activeMech(), true);
       this.manualPan = false;
     }
 
-    // --- LATCH IS READ (concern #3): re-frame the active mech only when it has
-    // drifted out of the safe band AND no manual pan is latched. The `!manualPan`
-    // guard is the genuine READ that lets a manual pan survive aim/move. ---
     if (!this.manualPan) this.keepActiveMechFramed();
 
-    // --- Shot select (1/2/3); Trojan only when armed ---
     if (Phaser.Input.Keyboard.JustDown(this.key1)) this.selectedShotId = "shot-1";
     if (Phaser.Input.Keyboard.JustDown(this.key2)) this.selectedShotId = "shot-2";
     if (Phaser.Input.Keyboard.JustDown(this.key3)) {
@@ -355,8 +815,6 @@ export class MatchScene extends Phaser.Scene {
       }
     }
 
-    // --- Preview render (PLAY-02). Indicator + dev arc consume the ABSOLUTE
-    // angle so the preview, launch line, barrel, and fired shot all agree. ---
     const absAngle = this.absoluteAngle(activePlayer.facing);
     const muzzle = activeView.getMuzzle();
     this.aimView.drawLaunchIndicator(
@@ -379,21 +837,26 @@ export class MatchScene extends Phaser.Scene {
   }
 
   /**
-   * Fire the current shot through THE SEAM, animate it, and chain the impact +
-   * turn-advance. Enters RESOLVING so the turn cannot fire/advance twice.
+   * HOTSEAT fire (Phase 2 dev loop, env-gated behind !networked).
+   *
+   * KNOWN LIMITATION (consequence of the Phase 3 applyShot gutting): applyShot is
+   * now fire-and-forget and the hotseat controller has NO fireSender injected, so
+   * the seam call is a no-op. Local outcome resolution (resolveShot/HP/carve) was
+   * intentionally removed from the controller — and the scene cannot re-add it
+   * (the ESLint seam guard bans the sim outcome fns in scenes/**). So the hotseat
+   * dev loop now animates the local PREVIEW arc and advances the local turn
+   * machine (afterImpact), but no longer carves terrain or applies damage.
+   * Networked mode (VITE_NETWORKED=1) is the product path; hotseat survives as a
+   * camera/aim/HUD/turn-advance dev sandbox. The seam call is preserved so the
+   * structure stays identical to Phase 2.
    */
   private fire(active: Mech, activeView: MechView): void {
     this.phase = "RESOLVING";
     this.hud.clearIntro();
-    // Firing overrides any manual pan from aim — the follow-cam takes over (the
-    // existing startFollow below follows BOTH x and y, so vertical follow is free).
     this.manualPan = false;
 
     const def = LOADOUT[this.selectedShotId];
 
-    // Launch from the barrel TIP so the dot leaves the muzzle. The relative aim
-    // angle is converted to the sim's ABSOLUTE angle through the active player's
-    // facing (02-04 NO-GO fix 2), so the fired arc matches the previewed barrel.
     const muzzle = activeView.getMuzzle();
     const aim = buildShotInput({
       mech: active,
@@ -407,66 +870,33 @@ export class MatchScene extends Phaser.Scene {
     aim.x = muzzle.x;
     aim.y = muzzle.y;
 
-    // THE SEAM CALL — the only outcome-producing path (Phase 3 swap point).
-    const result = this.controller.applyShot(aim, def);
+    // THE SEAM CALL (fire-and-forget; hotseat has no sender, so this is a no-op).
+    this.controller.applyShot(aim, def);
 
-    // FIRE-TIME HP DROP (Phase-2 timing parity): applyShot has ALREADY decremented
-    // each damaged mech's hp synchronously above, so refresh the floating HP NOW —
-    // the instant the shot resolves logically — instead of waiting for the dot to
-    // land. Mirrors how the Phase-2 Hud reflected HP during RESOLVING.
-    for (const m of this.mechs) {
-      this.mechViews[m.id].setHp(m.hp);
-    }
-
-    const totalDamage = result.damage.reduce((s, d) => s + d.amount, 0);
-    const blastRadius = def.blastRadius;
+    // Hotseat animates the local PREVIEW arc (the only remaining local-sim call).
+    const path = this.controller.previewTrajectory(aim);
 
     const projectile = new ProjectileView(this);
     const cam = this.cameras.main;
     cam.startFollow(projectile.sprite, false, FOLLOW_LERP, FOLLOW_LERP);
 
-    projectile.animateAlong(result.path, () => {
+    projectile.animateAlong(path, () => {
       cam.stopFollow();
-
-      const impact = result.impact ?? result.path[result.path.length - 1] ?? null;
-
-      // Repaint the visual terrain from the (already-carved) mask so craters
-      // mirror the authoritative holes. `applyShot` carved this.mask in place
-      // (same TerrainMask instance the controller holds), so this re-mirrors it.
-      this.terrain.repaintFromMask(this.mask);
-
-      // Destructible-terrain settle: any mech whose ground was carved out falls
-      // to the new surface.
       this.settleMechs();
-
-      // IMPACT REFRESH (settle-safe): HP does not change at settle, but
-      // settleMechs() tweens mech POSITION — re-call setHp so the floating widget
-      // re-anchors via the shared layout helper and is never left at a stale
-      // pre-settle coordinate.
       for (const m of this.mechs) {
         this.mechViews[m.id].setHp(m.hp);
       }
-
-      if (impact) {
-        this.fx.explode(impact, blastRadius);
-        const intensity = Math.min(0.02, totalDamage * SHAKE_PER_DAMAGE);
-        this.fx.shake(MAX_SHAKE_MS, intensity);
-      }
-
-      // Floating damage numbers at each damaged mech's position.
-      this.fx.floatDamage(result.damage, (mechId) => {
-        const m = this.mechs.find((mm) => mm.id === mechId);
-        return m ? { x: m.x, y: m.y } : null;
-      });
-
-      // After the FX settle, advance the turn and frame the next mech.
       this.time.delayedCall(POST_IMPACT_MS, () => this.afterImpact());
     });
   }
 
-  /** Advance the delay queue, reroll wind, frame the next mech, check the win. */
+  /**
+   * HOTSEAT-ONLY (env-gated behind !networked): advance the delay queue, reroll
+   * wind, frame the next mech, check the win. DEAD in networked mode — there,
+   * active player / wind / HP / terrain / phase come ONLY from syncFromState (the
+   * #1 authority leak is gutted; this is never invoked in networked play).
+   */
   private afterImpact(): void {
-    // Turn change overrides a manual pan (UI-SPEC: "Overrides any manual pan").
     this.manualPan = false;
 
     const winnerId = this.controller.checkWin();
@@ -478,56 +908,44 @@ export class MatchScene extends Phaser.Scene {
     this.controller.advanceTurn();
 
     const nextId = this.controller.state.activePlayerId;
-    // Refresh active outlines (cyan moves to the new active mech).
     for (const id of [P1_ID, P2_ID]) {
       this.mechViews[id].setActive(id === nextId);
     }
 
-    // Point the new active mech's barrel along ITS facing (02-04 NO-GO fix 2).
     const nextPlayerState = this.controller.state.players.find((p) => p.id === nextId);
     if (nextPlayerState) {
       this.mechViews[nextId].setBarrelAngle(this.absoluteAngle(nextPlayerState.facing));
     }
 
-    // Reset the new active player's per-turn move budget + roll fresh wind.
     const nextPlayer = this.controller.state.players.find((p) => p.id === nextId);
     if (nextPlayer) nextPlayer.moveBudget = MOVE_BUDGET_PER_TURN;
     this.controller.rollWind();
 
-    // Frame the next active mech ABOVE the bottom bar (shared helper so the bar
-    // clearance is consistent with the opening frame / C-recenter / rematch).
     const nextMech = this.mechs.find((m) => m.id === nextId);
     if (nextMech) {
       this.frameOnMech(nextMech, true);
     }
 
-    // Reset aim for the next turn and re-enable input.
     this.power = 0;
     this.charging = false;
     this.selectedShotId = "shot-1";
     this.phase = "AIM";
   }
 
-  /** Last-mech-standing (PLAY-07): freeze input + show the win banner. */
+  /** HOTSEAT-ONLY: last-mech-standing — freeze input + show the win banner. */
   private endMatch(winnerId: string): void {
     this.phase = "OVER";
     for (const id of [P1_ID, P2_ID]) this.mechViews[id].setActive(false);
     this.hud.showWinBanner(winnerId.toUpperCase());
   }
 
-  /**
-   * R rematch (PLAY-07, non-destructive): rebuild a FRESH uncarved mask + the
-   * cosmetic terrain texture, rebuild the match state/controller, reset both
-   * mechs to 100 HP at their start positions, reset the HUD, and re-center P1.
-   */
+  /** HOTSEAT-ONLY: R rematch (non-destructive). Never bound in networked mode. */
   private rematch(): void {
-    // Tear down old world views so the rebuild starts clean.
     for (const id of [P1_ID, P2_ID]) {
       this.mechViews[id].destroy();
     }
     this.terrain.destroy();
 
-    // Fresh, uncarved authority + cosmetic mirror.
     this.mask = TerrainMask.fromMap(MAP);
     this.terrain = TerrainView.build(this, this.mask);
 
@@ -537,17 +955,11 @@ export class MatchScene extends Phaser.Scene {
 
     const p1 = this.mechs[0];
     this.cameras.main.stopFollow();
-    // Frame P1 above the bar (instant) and clear any stale latch for a fresh match.
     this.frameOnMech(p1, false);
     this.manualPan = false;
   }
 
-  /**
-   * Attempt one walk step. Reads the collision mask for the ground at the
-   * candidate X and BLOCKS the move if the surface rise exceeds MAX_STEP_RISE
-   * (the "steep wall" rule, client-side, no sim change). Decrements moveBudget
-   * by the distance actually walked; clamps when the budget is spent.
-   */
+  /** HOTSEAT-ONLY walk step. */
   private tryWalk(mech: Mech, view: MechView, dir: -1 | 1, dt: number): void {
     const player = this.controller.state.players.find((p) => p.id === mech.id);
     if (!player) return;
@@ -571,7 +983,6 @@ export class MatchScene extends Phaser.Scene {
       this.mask.height,
     );
 
-    // Surface rise = ground getting HIGHER (smaller y, y-down). Block steep walls.
     const rise = currentSurface - candidateSurface;
     if (rise > MAX_STEP_RISE) {
       this.hud.flash("BLOCKED", { x: mech.x, y: mech.y });
@@ -584,14 +995,7 @@ export class MatchScene extends Phaser.Scene {
     player.moveBudget = Math.max(0, player.moveBudget - step);
   }
 
-  /**
-   * Destructible-terrain settle (02-04 fun-gate): after a shot carves the mask,
-   * any mech whose ground dropped out falls to the new surface. The mech MODEL y
-   * updates immediately (so the next turn's launch/collision is correct) while
-   * the VIEW tweens down. Carving only removes ground, so mechs only ever fall.
-   * Phase 3 makes this server-authoritative; for the local hotseat the Scene
-   * owns it (consistent with tryWalk's surface re-seating).
-   */
+  /** HOTSEAT-ONLY settle. */
   private settleMechs(): void {
     for (const mech of this.mechs) {
       const surface = surfaceY(
@@ -623,15 +1027,7 @@ export class MatchScene extends Phaser.Scene {
     return m;
   }
 
-  /**
-   * Single source of the framing offset. Centers the camera so the mech sits at
-   * FRAME_FRAC down the viewport (lower third) — clear of the 96px bottom bar
-   * with the bulk of the screen as sky/arc room above. The offset is
-   * proportional to the LIVE viewport height (`cam.height`), so it frames
-   * correctly at any window size (the canvas fills the window). Used by the
-   * initial frame, C-recenter, turn-start, and rematch so framing is identical
-   * everywhere. setBounds clamps the target near the world/sky edges.
-   */
+  /** Single source of the framing offset. */
   private frameOnMech(mech: Mech, animate: boolean): void {
     const cam = this.cameras.main;
     const targetY = mech.y + (FRAME_FRAC - 0.5) * cam.height;
@@ -642,18 +1038,7 @@ export class MatchScene extends Phaser.Scene {
     }
   }
 
-  /**
-   * Re-frame the active mech ONLY when it has drifted out of a central safe band
-   * — so aim/walk does not fight the camera every frame, but a mech walked to the
-   * screen edge (or down toward the bar) is brought back. Skipped entirely while
-   * `manualPan` is latched (the caller guards with `!this.manualPan`), which is
-   * how a manual right-drag pan genuinely survives aim/move.
-   *
-   * Safe-band thresholds (discretion-owned framing math, documented in SUMMARY):
-   *  - horizontal: 15% inset from each viewport edge
-   *  - vertical (bottom): re-frame if the mech sits below the bar-top minus a
-   *    24px margin (i.e. it is drifting toward/behind the 96px bar)
-   */
+  /** HOTSEAT-ONLY auto-frame. */
   private keepActiveMechFramed(): void {
     const active = this.activeMech();
     const cam = this.cameras.main;
@@ -668,7 +1053,7 @@ export class MatchScene extends Phaser.Scene {
     }
   }
 
-  /** The active player's turn-economy state (holds the aim `facing`). */
+  /** HOTSEAT-ONLY: the active player's turn-economy state (holds the aim facing). */
   private activePlayerState(): PlayerState {
     const id = this.controller.state.activePlayerId;
     const p = this.controller.state.players.find((pl) => pl.id === id);
@@ -678,15 +1063,14 @@ export class MatchScene extends Phaser.Scene {
 
   /**
    * Convert the on-screen 0–90 relative aim into the sim's absolute angle for a
-   * given facing (mirror of buildShotInput's rule): facing +1 → angle;
-   * facing -1 → 180 - angle. Used for the barrel + preview so they match the
-   * fired shot exactly.
+   * given facing (mirror of buildShotInput's rule). Networked mode uses facing 1
+   * locally (the server stores the authoritative facing for the spectator render).
    */
   private absoluteAngle(facing: 1 | -1): number {
     return facing === 1 ? this.angleDeg : 180 - this.angleDeg;
   }
 
-  /** Set the active player's facing (on ←/→) and flip the chassis to match. */
+  /** HOTSEAT-ONLY: set the active player's facing (on ←/→) and flip the chassis. */
   private setActiveFacing(
     player: PlayerState,
     view: MechView,
