@@ -5,6 +5,9 @@
   "engines": {
     "node": ">=22"
   },
+  "pnpm": {
+    "onlyBuiltDependencies": ["esbuild", "msgpackr-extract"]
+  },
   "scripts": {
     "test": "vitest run",
     "test:watch": "vitest",
