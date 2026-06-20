@@ -40,6 +40,19 @@ export function surfaceY(mask: TerrainMask, x: number): number {
 }
 
 /**
+ * Drop-only settle: a mobile resting at `currentY` over its column's post-carve
+ * `ground` (the topmost solid Y from {@link surfaceY}) settles DOWN onto the
+ * ground when terrain beneath it was carved away. It NEVER raises — carving only
+ * removes terrain, so `ground` only ever moves down — and the `> +0.5` guard
+ * avoids sub-pixel jitter. Uses the SAME raw `surfaceY` seating spawnLayout
+ * uses, so spawn and settle never disagree. Pure geometry; NO fall damage
+ * (PROJECT.md out-of-scope) — it purely repositions. Unit-tested headlessly.
+ */
+export function settledY(currentY: number, ground: number): number {
+  return ground > currentY + 0.5 ? ground : currentY;
+}
+
+/**
  * Derive the spawn positions for a `teamSize`-per-team, 2-team match
  * (RESEARCH Open Question 3). The 2048-wide map is split into two halves; team
  * A's mobiles are spaced evenly across the LEFT half ([200, 900]) and team B's

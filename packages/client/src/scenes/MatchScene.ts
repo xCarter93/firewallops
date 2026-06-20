@@ -150,6 +150,9 @@ export class MatchScene extends Phaser.Scene {
   private lastAimSentAt = 0;
   // Latest synced absolute HP per sessionId (the authoritative reconcile source).
   private syncedHp: Record<string, number> = {};
+  // Latest synced absolute Y per sessionId — the authoritative settle target,
+  // reconciled (tweened) on animation-land like HP, never applied mid-shot.
+  private syncedY: Record<string, number> = {};
   // Latest synced SS-charge for the LOCAL player (gates Trojan selection; the
   // server is the real arming authority and rejects an unearned Trojan).
   private localSsCharge = 0;
@@ -390,6 +393,7 @@ export class MatchScene extends Phaser.Scene {
     state.mobiles.forEach((mobile, key) => {
       const id = mobile.sessionId || key;
       this.syncedHp[id] = mobile.hp;
+      this.syncedY[id] = mobile.y;
       ordered.push({
         sessionId: id,
         team: mobile.team,
@@ -406,26 +410,28 @@ export class MatchScene extends Phaser.Scene {
         this.mechs.push({ id, x: mobile.x, y: mobile.y, hp: mobile.hp });
       }
 
-      // Position, facing, barrel (the spectator barrel render snaps to the
-      // server's ABSOLUTE angle), and the active outline.
-      view.setPosition(mobile.x, mobile.y);
+      // Facing, barrel (the spectator barrel render snaps to the server's
+      // ABSOLUTE angle), active outline, and team color apply EVERY patch — they
+      // never move the body, so they are safe mid-animation.
       view.setFacing(mobile.facing >= 0 ? 1 : -1);
       view.setBarrelAngle(mobile.angleDeg);
       view.setActive(id === state.activePlayer);
       view.setTeamColor(mobile.team);
 
-      // Keep the local mech record's position in sync (FX anchors read it).
       const rec = this.mechs.find((m) => m.id === id);
-      if (rec) {
-        rec.x = mobile.x;
-        rec.y = mobile.y;
-      }
 
-      // Apply HP immediately ONLY in steady state — never mid-animation (a
-      // schema patch must not drop HP before the shotResult animation lands).
+      // Apply POSITION + HP immediately ONLY in steady state — never
+      // mid-animation. A schema patch must not snap the mech to its settled spot
+      // or drop its HP before the shotResult animation lands; both are
+      // reconciled on land (applySettleFromState / applyHpFromState).
       if (!this.isAnimatingShot) {
+        view.setPosition(mobile.x, mobile.y);
         view.setHp(mobile.hp);
-        if (rec) rec.hp = mobile.hp;
+        if (rec) {
+          rec.x = mobile.x;
+          rec.y = mobile.y;
+          rec.hp = mobile.hp;
+        }
       }
 
       if (id === state.activePlayer) activeMobile = mobile;
@@ -524,9 +530,11 @@ export class MatchScene extends Phaser.Scene {
       });
 
       // End of animation: HP is reconciled to the synced ABSOLUTE (Agreed
-      // Concern #2) — never `setHp(currentHp - damage)`.
+      // Concern #2) — never `setHp(currentHp - damage)`. Mechs whose ground was
+      // carved away settle DOWN to the synced authoritative Y (tweened).
       this.isAnimatingShot = false;
       this.applyHpFromState();
+      this.applySettleFromState();
 
       // A terrain snapshot that arrived mid-animation is applied now (race-safe).
       if (this.pendingTerrain) {
@@ -549,6 +557,35 @@ export class MatchScene extends Phaser.Scene {
       view.setHp(hp);
       const rec = this.mechs.find((m) => m.id === id);
       if (rec) rec.hp = hp;
+    }
+  }
+
+  /**
+   * Reconcile every MechView's Y to the LATEST synced schema absolute when an
+   * animation lands — mechs whose ground was carved away settle DOWN onto the
+   * new surface. The server is the authority (it recomputed each mobile's resting
+   * Y post-carve); the client only TWEENS to it (the hotseat settle feel). Mirror
+   * of applyHpFromState; drop-only, so a mech never visibly rises. X is held
+   * (no walking in networked mode), captured before the tween.
+   */
+  private applySettleFromState(): void {
+    for (const [id, view] of Object.entries(this.mechViews)) {
+      const targetY = this.syncedY[id];
+      if (targetY === undefined) continue;
+      const fromY = view.y;
+      if (targetY <= fromY + 0.5) continue; // already settled (or would rise)
+
+      const fromX = view.x;
+      const proxy = { y: fromY };
+      this.tweens.add({
+        targets: proxy,
+        y: targetY,
+        duration: Phaser.Math.Clamp((targetY - fromY) * 6, 150, 600),
+        ease: "Quad.easeIn",
+        onUpdate: () => view.setPosition(fromX, proxy.y),
+      });
+      const rec = this.mechs.find((m) => m.id === id);
+      if (rec) rec.y = targetY;
     }
   }
 

@@ -52,6 +52,39 @@ export const SS_HITS_TO_ARM = 3;
  */
 export const AIM_THROTTLE_MS = 100;
 
+/**
+ * Post-impact settle beat (ms) the Room dwells in RESOLVING AFTER the shot's
+ * flight, before advancing the turn — covers the client impact FX + mech-settle
+ * tween so the turn does NOT flip the instant the shot is fired. Mirrors the
+ * hotseat POST_IMPACT feel.
+ */
+export const RESOLVE_SETTLE_MS = 600;
+
+/**
+ * Client shot-flight timing MIRROR (packages/client/src/view/ProjectileView.ts):
+ * the dot advances PROJECTILE_PTS_PER_MS path samples/ms, clamped to
+ * [PROJECTILE_MIN_FLIGHT_MS, PROJECTILE_MAX_FLIGHT_MS]. The Room dwells in
+ * RESOLVING for the SAME computed flight + RESOLVE_SETTLE_MS so the
+ * server-driven turn advance waits for the client animation. KEEP IN SYNC with
+ * ProjectileView — a drift only loosens the dwell, it cannot desync authority.
+ */
+export const PROJECTILE_PTS_PER_MS = 0.06;
+export const PROJECTILE_MIN_FLIGHT_MS = 600;
+export const PROJECTILE_MAX_FLIGHT_MS = 1200;
+
+/**
+ * The RESOLVING dwell (ms) the Room holds before advancing the turn / ending the
+ * match: the client's clamped flight time for `pathLength` trajectory samples
+ * plus the post-impact settle beat. Pure — unit-tested in resolveTiming.test.ts.
+ */
+export function resolveDwellMs(pathLength: number): number {
+  const flight = Math.min(
+    PROJECTILE_MAX_FLIGHT_MS,
+    Math.max(PROJECTILE_MIN_FLIGHT_MS, pathLength / PROJECTILE_PTS_PER_MS),
+  );
+  return flight + RESOLVE_SETTLE_MS;
+}
+
 export type MatchMode = "1v1" | "2v2" | "4v4";
 
 /**

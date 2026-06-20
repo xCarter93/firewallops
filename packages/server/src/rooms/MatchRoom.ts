@@ -44,8 +44,9 @@ import {
   GRAVITY,
   SS_HITS_TO_ARM,
   MATCH_CONFIG,
+  resolveDwellMs,
 } from "../config.js";
-import { MAP, spawnLayout } from "../match/world.js";
+import { MAP, spawnLayout, surfaceY, settledY } from "../match/world.js";
 import { runServerShot, type ServerMech } from "../match/resolve.js";
 import {
   advanceTurn,
@@ -336,6 +337,15 @@ export class MatchRoom extends Room<{ state: MatchState }> {
       if (mob) mob.hp = m.hp;
     }
 
+    // Settle every mobile onto the POST-CARVE surface — a mobile floated when
+    // the ground beneath it was blown away. Authoritative + synced (schema y):
+    // the client reconciles each mobile's y on animation-land, exactly like HP.
+    // Drop-only, NO fall damage (PROJECT.md out-of-scope), and the SAME raw
+    // surfaceY seating spawnLayout uses so spawn and settle never disagree.
+    this.state.mobiles.forEach((m) => {
+      m.y = settledY(m.y, surfaceY(this.terrain, Math.round(m.x)));
+    });
+
     // SS-charge tick (Authority Decision 5): any landed damage counts as one
     // hit (capped); firing the Trojan consumes the charge.
     if (result.damage.length > 0) {
@@ -351,7 +361,24 @@ export class MatchRoom extends Room<{ state: MatchState }> {
     // Authoritative outcome broadcast (NET-01).
     this.broadcast("shotResult", result);
 
-    // Resolve win / draw / next turn — the result is NEVER left undefined.
+    // Hold RESOLVING for the shot's flight + a post-impact settle beat before
+    // advancing the turn / ending the match — so the turn no longer flips the
+    // instant the shot is fired (the turn timer is already cleared above). The
+    // dwell mirrors the client's flight timing from the SAME path length.
+    this.clock.setTimeout(
+      () => this.afterResolve(),
+      resolveDwellMs(result.path.length),
+    );
+  }
+
+  /**
+   * Post-RESOLVING transition (NET-03), scheduled by resolveActiveShot after the
+   * client-animation dwell: resolve win / draw / next turn — the result is NEVER
+   * left undefined. Split out of resolveActiveShot so the turn advance waits for
+   * the shot to land instead of firing synchronously in the same tick as the
+   * shotResult broadcast.
+   */
+  private afterResolve(): void {
     const outcome = checkWinTeam(this.turnView());
     if (outcome.kind === "winner") {
       this.endMatch(outcome.team);
