@@ -172,6 +172,11 @@ export class Hud {
   private readonly introBody: Phaser.GameObjects.Text;
   private introVisible = true;
 
+  // Minimal turn countdown (Phase 3, NET-04) — drawn at the top-center under the
+  // wind widget. Polished styling is Phase 6 (UI-02); clock skew (~RTT) is
+  // acceptable this phase (no server-time offset).
+  private readonly countdownText: Phaser.GameObjects.Text;
+
   // Transient near-mech flash (OUT OF MOVE BUDGET / BLOCKED).
   private readonly flashText: Phaser.GameObjects.Text;
   private flashTimer?: Phaser.Time.TimerEvent;
@@ -260,6 +265,15 @@ export class Hud {
       scene.add.text(0, 0, INTRO_BODY, LABEL_STYLE).setOrigin(0.5),
     );
 
+    // Minimal turn countdown (top-center, below the wind magnitude). Hidden
+    // until setCountdown is called (hotseat never calls it).
+    this.countdownText = this.lock(
+      scene.add
+        .text(0, 0, "", NUM_SM_STYLE)
+        .setOrigin(0.5, 0)
+        .setVisible(false),
+    );
+
     // --- Transient flash (positioned at a world point, so NOT scroll-locked) ---
     this.flashText = scene.add
       .text(0, 0, "", { ...LABEL_STYLE, color: "#EF4444" })
@@ -311,6 +325,9 @@ export class Hud {
     // Wind (top-center).
     this.windLabel.setPosition(w / 2, MARGIN);
     this.windNum.setPosition(w / 2, WIND_NUM_Y);
+
+    // Turn countdown sits just below the wind magnitude (top-center).
+    this.countdownText.setPosition(w / 2, WIND_NUM_Y + 30);
 
     // Bar chrome: full-width 96px rect + top divider, pinned to viewport bottom.
     this.drawBarChrome();
@@ -415,6 +432,77 @@ export class Hud {
 
     // --- Turn list: rows ordered by lowest accumulatedDelay (acts next first) ---
     this.drawTurnList(state);
+  }
+
+  /**
+   * Networked HUD refresh (Phase 3). Mirrors `update()` but reads the synced
+   * server state instead of the local MatchController: wind, the active player's
+   * SS-charge + armed state, the power meter, and an N-mobile turn list passed in
+   * pre-ordered (the scene derives it from the synced mobiles by accumulatedDelay,
+   * keyed by sessionId — no P1/P2 hardcoding). Additive: the hotseat `update()`
+   * is untouched.
+   */
+  updateNetworked(args: {
+    wind: number;
+    ssHitCharge: number;
+    armed: boolean;
+    power: number;
+    selectedShotId: ShotId;
+    /** Turn rows in act-next-first order; `isNext` marks the head row. */
+    turnRows: { label: string; isNext: boolean }[];
+    dtMs: number;
+  }): void {
+    this.pulseT += args.dtMs / 1000;
+
+    this.drawWindArrow(args.wind);
+    this.windNum.setText(`${Math.abs(args.wind).toFixed(0)}`);
+
+    this.drawChips(args.selectedShotId, args.armed);
+    this.drawPips(args.ssHitCharge, args.armed);
+    // MOVE budget is client-local cosmetic in networked mode; show it full.
+    this.drawMove(MOVE_BUDGET_PER_TURN);
+    this.drawPower(args.power);
+    this.drawTurnRows(args.turnRows);
+  }
+
+  /**
+   * Minimal turn countdown (NET-04): render the remaining seconds (clamped at 0)
+   * top-center. Polished styling is Phase 6; clock skew (~RTT) is acceptable.
+   */
+  setCountdown(secondsRemaining: number): void {
+    const s = Math.max(0, Math.ceil(secondsRemaining));
+    this.countdownText.setText(`TURN: ${s}s`).setVisible(true);
+  }
+
+  /** Hide the countdown (e.g. WAITING / RESULTS). */
+  hideCountdown(): void {
+    this.countdownText.setVisible(false);
+  }
+
+  /**
+   * Draw a pre-ordered turn list (networked path). Identical visuals to
+   * drawTurnList but driven by plain {label,isNext} rows rather than the local
+   * MatchState players array — supports up to the pre-created row count (8).
+   */
+  private drawTurnRows(rows: { label: string; isNext: boolean }[]): void {
+    const g = this.turnG;
+    g.clear();
+    rows.forEach((r, i) => {
+      const row = this.turnRows[i];
+      if (!row) return;
+      const top = this.turnRowsTop + i * TURN_ROW_H;
+      if (r.isNext) {
+        g.fillStyle(CYAN, 0.2);
+        g.fillRect(this.turnX, top, TURN_W, TURN_ROW_H);
+        g.lineStyle(2, CYAN, 1);
+        g.strokeRect(this.turnX, top, TURN_W, TURN_ROW_H);
+      }
+      row.setText(r.isNext ? `${r.label}  NEXT ▸` : r.label);
+      row.setColor(r.isNext ? "#22D3EE" : TEXT);
+    });
+    for (let i = rows.length; i < this.turnRows.length; i++) {
+      this.turnRows[i].setText("");
+    }
   }
 
   /** Shot-select chips: selected gets the cyan border; TRJ is locked until armed. */
@@ -590,7 +678,18 @@ export class Hud {
   /** Show the win banner (PLAY-07). Orbitron 48px + "R to rematch" sub-line. */
   showWinBanner(winnerLabel: string): void {
     this.banner.setText(`${winnerLabel} WINS`).setVisible(true);
-    this.bannerSub.setVisible(true);
+    this.bannerSub.setText("R to rematch").setVisible(true);
+  }
+
+  /**
+   * Networked result banner (Phase 3): show the EXACT text supplied by the scene
+   * (e.g. "TEAM A WINS" or "DRAW") with a "reload to replay" sub-line — proper
+   * rematch is Phase 6, so the networked path reloads/rejoins instead of binding R.
+   */
+  showResultBanner(text: string): void {
+    this.banner.setText(text).setVisible(true);
+    this.bannerSub.setText("reload to replay").setVisible(true);
+    this.hideCountdown();
   }
 
   /** Reset for a fresh match (rematch): re-show intro, hide the banner. */

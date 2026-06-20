@@ -59,6 +59,17 @@ export class AimView {
   }
 
   /**
+   * Clear all aim overlays (Phase 3): the launch indicator + the dev arc +
+   * readout. Used by the networked scene to wipe any local aim ghost when it is
+   * NOT the local player's turn (opponents see barrel-angle only — no arc ghost).
+   */
+  clear(): void {
+    this.indicator.clear();
+    this.arc.clear();
+    this.readout.setVisible(false);
+  }
+
+  /**
    * Production launch indicator (Pattern 4, PLAY-02). Stubby cyan line from the
    * muzzle; length grows with power; a small wind-tilt nudges the angle.
    *

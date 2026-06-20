@@ -32,6 +32,13 @@ const HP_SURFACE = 0x334155;
 const HP_TEXT = "#F8FAFC";
 const HP_TEXT_CRITICAL = "#EF4444";
 
+// --- Team body colors (Phase 3, 2-team model). Team 0 = A, team 1 = B. The
+// default chassis color (0x1e293b) is kept for the hotseat path; networked
+// mechs are tinted by team so opponents are distinguishable at a glance. ---
+const TEAM_DEFAULT = 0x1e293b;
+const TEAM_A = 0x2563eb; // blue-600 — Team A
+const TEAM_B = 0xdc2626; // red-600 — Team B
+
 export class MechView {
   private readonly body: Phaser.GameObjects.Rectangle;
   private readonly barrel: Phaser.GameObjects.Line;
@@ -145,6 +152,17 @@ export class MechView {
   /** Flip the chassis to face left (-1) or right (+1) — visual cue only. */
   setFacing(facing: 1 | -1): void {
     this.body.setScale(facing, 1);
+  }
+
+  /**
+   * Tint the chassis by team (Phase 3, 2-team model): team 0 = Team A (blue),
+   * team 1 = Team B (red). Any other value falls back to the default chassis
+   * color. Color is a secondary cue only — the cyan active outline + barrel +
+   * HP widget remain the primary signals (no color-only state).
+   */
+  setTeamColor(team: number): void {
+    const color = team === 0 ? TEAM_A : team === 1 ? TEAM_B : TEAM_DEFAULT;
+    this.body.setFillStyle(color);
   }
 
   /** Toggle the cyan "you control this" outline (UI-SPEC reserved cyan #1). */
