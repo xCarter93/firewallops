@@ -1,0 +1,25 @@
+{
+  "name": "@firewallops/server",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "start": "tsx src/index.ts",
+    "typecheck": "tsc --noEmit -p ."
+  },
+  "dependencies": {
+    "colyseus": "0.17.10",
+    "@colyseus/core": "0.17.43",
+    "@colyseus/schema": "4.0.26",
+    "zod": "4.4.3",
+    "express": "^4.21.0",
+    "@shared/sim": "workspace:*"
+  },
+  "devDependencies": {
+    "tsx": "4.22.4",
+    "typescript": "6.0.3",
+    "@types/node": "22.19.21",
+    "@types/express": "^4.17.21"
+  }
+}
