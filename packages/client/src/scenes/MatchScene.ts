@@ -163,6 +163,8 @@ export class MatchScene extends Phaser.Scene {
   private lastTurnEndsAt = -1;
   // One-shot initial camera framing once the local mech first appears in state.
   private framedOnLocal = false;
+  // The active player the camera is currently framed on (re-frames each turn).
+  private lastFramedActive = "";
 
   // Input handles.
   private cursors!: Phaser.Types.Input.Keyboard.CursorKeys;
@@ -449,13 +451,22 @@ export class MatchScene extends Phaser.Scene {
       dtMs: 0,
     });
 
-    // One-shot: frame the camera on the local mech the first time it appears.
-    if (!this.framedOnLocal) {
-      const view = this.localMechView();
-      if (view) {
+    // Camera: frame the ACTIVE mech at the start of each turn so BOTH players
+    // watch whoever is shooting (matches the hotseat feel). After a shot the
+    // camera follows the projectile into the terrain (animateShot) and stops
+    // there; this re-frames on the next active mech when the turn advances.
+    // A manual right-drag pan is preserved until the next turn change.
+    if (this.activePlayerId && this.activePlayerId !== this.lastFramedActive) {
+      const activeView = this.mechViews[this.activePlayerId];
+      if (activeView) {
+        const animate = this.framedOnLocal; // first frame is instant, then pan
+        this.lastFramedActive = this.activePlayerId;
         this.framedOnLocal = true;
-        this.frameOnMech({ id: this.sessionId, x: view.x, y: view.y, hp: 0 }, false);
         this.manualPan = false;
+        this.frameOnMech(
+          { id: this.activePlayerId, x: activeView.x, y: activeView.y, hp: 0 },
+          animate,
+        );
       }
     }
   }

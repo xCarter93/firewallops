@@ -35,6 +35,8 @@ export class TerrainView {
   private static readonly SURFACE_HL = 0x64748b; // top-edge highlight (slate-500)
 
   private static readonly TEXTURE_KEY = "terrain";
+  /** Background depth — below mechs/projectiles/HUD (which default to depth 0+). */
+  static readonly DEPTH = -100;
 
   private constructor(
     private readonly scene: Phaser.Scene,
@@ -68,7 +70,14 @@ export class TerrainView {
 
     TerrainView.paint(scene, dt, mask);
 
-    const image = scene.add.image(0, 0, TerrainView.TEXTURE_KEY).setOrigin(0, 0);
+    // Terrain is the BACKGROUND layer — pin it to a low depth so a mid-match
+    // rebuild (networked RLE snapshot via MatchScene.rebuildTerrain) cannot paint
+    // over the mechs / HUD that were created earlier. Without this, z-order is
+    // pure creation order and the rebuilt terrain hides everything above it.
+    const image = scene.add
+      .image(0, 0, TerrainView.TEXTURE_KEY)
+      .setOrigin(0, 0)
+      .setDepth(TerrainView.DEPTH);
 
     return new TerrainView(scene, dt, image);
   }

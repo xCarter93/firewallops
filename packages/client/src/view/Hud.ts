@@ -121,6 +121,9 @@ const CHIP_DEFS: { id: ShotId; glyph: string }[] = [
 ];
 
 export class Hud {
+  /** HUD overlay depth — above the world (terrain at -100, mechs at 0). */
+  private static readonly DEPTH = 1000;
+
   // Live viewport (updated by resize()).
   private w: number;
   private h: number;
@@ -294,9 +297,19 @@ export class Hud {
     this.layout();
   }
 
-  /** Lock a game object to the camera (HUD overlay does not scroll). */
-  private lock<T extends Phaser.GameObjects.Components.ScrollFactor>(obj: T): T {
+  /**
+   * Lock a game object to the camera (HUD overlay does not scroll) AND pin it
+   * above the world layers. The high depth keeps the bar on top even when the
+   * networked terrain is rebuilt from the RLE snapshot AFTER the HUD is created
+   * (z-order is otherwise pure creation order — the rebuilt terrain would hide
+   * the bar).
+   */
+  private lock<
+    T extends Phaser.GameObjects.Components.ScrollFactor &
+      Phaser.GameObjects.Components.Depth,
+  >(obj: T): T {
     obj.setScrollFactor(0);
+    obj.setDepth(Hud.DEPTH);
     return obj;
   }
 
