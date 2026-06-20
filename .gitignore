@@ -1,6 +1,8 @@
 # GSD planning docs — kept local-only (commit_docs: false)
 .planning/
 .claude/
+.codex/
+.agents/
 
 # Node / build artifacts
 node_modules/
