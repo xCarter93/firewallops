@@ -22,8 +22,34 @@ import type { ShotResult } from "../match/shotResult.js";
  * we coerce it with `new Uint8Array(payload)` before decoding (see toUint8Array).
  */
 
-/** The dev server address (Plan 03). Making this configurable is a Phase 4 concern. */
-export const SERVER_URL = "ws://localhost:2567";
+/**
+ * The authoritative server address. Build-time-injected via `VITE_SERVER_URL`
+ * (Vite inlines `import.meta.env.VITE_*` at build — a runtime env is `undefined`
+ * in a built static bundle), with a `ws://localhost:2567` fallback for local DEV
+ * ONLY. A PRODUCTION build (`import.meta.env.PROD`) with a missing/empty
+ * `VITE_SERVER_URL` throws loudly (no silent localhost in prod — review concern
+ * #11): a misconfigured deploy fails fast rather than pointing the CDN bundle at
+ * localhost. The deployed Vercel build sets this to the game server's `wss://`
+ * host (Railway's `wss://<service>.up.railway.app`) — the value is set in Vercel
+ * at deploy time (Plan 05). The deployed build ALSO sets `VITE_NETWORKED=1`
+ * (review C2) so the bundle runs the real networked match (hotseat is the
+ * documented-non-functional dev default); MatchScene already reads that flag —
+ * the value is set in Vercel (Plan 05). `new Client(SERVER_URL)` handles `wss://`.
+ */
+function resolveServerUrl(): string {
+  const envUrl = import.meta.env.VITE_SERVER_URL;
+  if (import.meta.env.PROD && (envUrl === undefined || envUrl.trim() === "")) {
+    throw new Error(
+      "VITE_SERVER_URL is required for a production build (the deployed wss:// " +
+        "game-server URL must be baked in at build time). Refusing to fall back " +
+        "to ws://localhost:2567 in production. Set VITE_SERVER_URL in the Vercel " +
+        "build env (Plan 05).",
+    );
+  }
+  return envUrl ?? "ws://localhost:2567";
+}
+
+export const SERVER_URL = resolveServerUrl();
 
 /**
  * The concrete handlers the scene supplies. The net layer forwards each server
