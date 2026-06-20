@@ -118,4 +118,22 @@ export default tseslint.config(
       ],
     },
   },
+  // @firewallops/server (Phase 3): honor the same leading-underscore convention
+  // for intentionally unused params. The v0 stub seams declare their real
+  // signatures but do not consume every arg yet — onAuth(_options, _context),
+  // getLoadout(_accountId), recordMatchResult(_payload) — so the shape is fixed
+  // for Plan 03/04 + Phase 5 (Clerk/economy) without tripping no-unused-vars.
+  {
+    files: ["packages/server/**/*.ts"],
+    rules: {
+      "@typescript-eslint/no-unused-vars": [
+        "error",
+        {
+          argsIgnorePattern: "^_",
+          varsIgnorePattern: "^_",
+          caughtErrorsIgnorePattern: "^_",
+        },
+      ],
+    },
+  },
 );

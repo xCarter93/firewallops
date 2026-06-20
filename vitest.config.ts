@@ -8,6 +8,7 @@ export default defineConfig({
     include: [
       "packages/shared/test/**/*.test.ts",
       "packages/client/src/**/*.test.ts",
+      "packages/server/test/**/*.test.ts",
     ],
   },
 });
