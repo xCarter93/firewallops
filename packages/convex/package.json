@@ -1,0 +1,17 @@
+{
+  "name": "@firewallops/convex",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "codegen": "convex codegen",
+    "typecheck": "tsc --noEmit -p convex/tsconfig.json"
+  },
+  "exports": {
+    "./api": "./convex/_generated/api.js",
+    "./schema": "./convex/schema.ts"
+  },
+  "dependencies": {
+    "convex": "1.41.0"
+  }
+}
