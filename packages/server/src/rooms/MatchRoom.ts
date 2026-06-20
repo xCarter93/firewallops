@@ -79,6 +79,14 @@ export class MatchRoom extends Room<{ state: MatchState }> {
   private turnTimer?: ReturnType<MatchRoom["clock"]["setTimeout"]>;
 
   /**
+   * Graceful-drain flag (review H2). Set true by `onBeforeShutdown` on a
+   * deploy/restart so the shutdown is observable (the broadcast notifies clients;
+   * the flag records the state). Reconnection is Phase 5 — this is the Phase-4
+   * best-effort drain so a deploy does not SILENTLY kill a live match.
+   */
+  draining = false;
+
+  /**
    * Inbound message map (NET-02 gate + NET-07 validation). Each handler is
    * wrapped in the Colyseus `validate(schema, handler)` helper, so a payload
    * failing the tightened Zod schema (power > 100, NaN, unknown itemId,
@@ -428,7 +436,9 @@ export class MatchRoom extends Room<{ state: MatchState }> {
     this.state.phase = "RESULTS";
     this.state.winnerTeam = winnerTeam;
     this.broadcast("matchEnded", { winnerTeam });
-    recordMatchResult({ winnerTeam });
+    // In-process authoritative write (review H7 preferred path). The roomId is a
+    // stable per-match idempotency key so a re-record is a no-op.
+    recordMatchResult({ winnerTeam, resultId: this.roomId });
   }
 
   /** Simultaneous-wipe draw (Codex MEDIUM) — winnerTeam -1 sentinel, never silent. */
@@ -436,6 +446,35 @@ export class MatchRoom extends Room<{ state: MatchState }> {
     this.state.phase = "RESULTS";
     this.state.winnerTeam = -1;
     this.broadcast("matchEnded", { winnerTeam: -1, draw: true });
-    recordMatchResult({ winnerTeam: -1 });
+    recordMatchResult({ winnerTeam: -1, resultId: this.roomId });
+  }
+
+  /**
+   * Graceful-drain hook (review H2) — Colyseus calls this when the server is
+   * shutting down for a deploy/restart (`gracefullyShutdown: true` is set in
+   * index.ts). It must NOT silently kill a live match. It:
+   *   - STOPS NEW MATCHMAKING: `this.lock()` removes the room from matchmaking
+   *     availability so no new client is placed into it while it drains.
+   *   - SIGNALS THE DRAIN: a `serverDraining` broadcast notifies in-flight
+   *     clients the server is going down, and the `draining` flag records it —
+   *     the shutdown is observable, not a silent kill.
+   *   - DRAINS BEST-EFFORT: it does NOT abruptly dispose an in-progress match.
+   *     The default Colyseus graceful-shutdown sequence plus the Railway
+   *     `RAILWAY_DEPLOYMENT_DRAINING_SECONDS`/`OVERLAP_SECONDS` window (set in
+   *     Plan 04/05) gives the in-flight match time to wind down. True
+   *     reconnection is Phase 5 (H1); this is the Phase-4 best-effort drain.
+   *
+   * Returning a promise lets Colyseus await the hook; we keep the awaited work
+   * bounded (a synchronous lock + broadcast) — the real time budget is the
+   * Railway draining-seconds env, not a server-side sleep.
+   */
+  async onBeforeShutdown(): Promise<void> {
+    this.draining = true;
+    // Stop new matchmaking — a locked room is removed from availability.
+    await this.lock();
+    // Notify in-flight clients (not a silent kill). If the match is already over
+    // (winnerTeam set), the framework disposes promptly; otherwise the drain
+    // window lets the live match wind down.
+    this.broadcast("serverDraining", { reason: "deploy" });
   }
 }
