@@ -1,4 +1,5 @@
 import Phaser from "phaser";
+import { muzzleOffset } from "@shared/sim";
 import { MECH_BODY_W, MECH_BODY_H } from "../world.js";
 
 /**
@@ -182,14 +183,16 @@ export class MechView {
 
   /**
    * The barrel tip in world space, for the launch indicator + projectile
-   * spawn. Uses the SAME single-negation y-down convention as the sim muzzle
-   * math so the cosmetic indicator and the real shot agree.
+   * spawn. Delegates to the shared `muzzleOffset` (Phase 3, Agreed Concern #1):
+   * the server authority (Plan 03) derives the launch point from the SAME
+   * helper, so this cosmetic preview tip and the real shot cannot drift.
+   *
+   * `this.barrel.rotation` is already `-DegToRad(absoluteAngleDeg)`, so feeding
+   * back the absolute degrees (`-rotation * 180 / Math.PI`) reproduces the
+   * identical tip the shared helper computes.
    */
   getMuzzle(): { x: number; y: number } {
-    const a = this.barrel.rotation; // already -DegToRad(angleDeg)
-    return {
-      x: this.body.x + Math.cos(a) * MechView.BARREL_LEN,
-      y: this.body.y + Math.sin(a) * MechView.BARREL_LEN,
-    };
+    const absoluteAngleDeg = (-this.barrel.rotation * 180) / Math.PI;
+    return muzzleOffset(this.body.x, this.body.y, absoluteAngleDeg);
   }
 }
