@@ -126,3 +126,13 @@ export function sendFire(
 ): void {
   room.send("fire", { angleDeg, power, itemId });
 }
+
+/**
+ * Tell the server the player's current weapon pick (NET-02). Without this the
+ * server's `Mobile.selectedItemId` keeps its default `shot-1`, so a turn-timeout
+ * auto-fire (NET-04) would fire the wrong shot. The message name "selectItem"
+ * and the `{ itemId }` payload shape MUST match the server's selectItemSchema.
+ */
+export function sendSelectItem(room: Room, itemId: string): void {
+  room.send("selectItem", { itemId });
+}

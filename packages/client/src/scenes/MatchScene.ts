@@ -19,7 +19,7 @@ import { ProjectileView } from "../view/ProjectileView.js";
 import { Fx } from "../view/Fx.js";
 import { Hud } from "../view/Hud.js";
 import type { MatchSceneData } from "./BootScene.js";
-import { connectToMatch, sendAim, sendFire } from "../net/room.js";
+import { connectToMatch, sendAim, sendFire, sendSelectItem } from "../net/room.js";
 import { ShotResultBridge } from "../net/shotResultBridge.js";
 import type { Room } from "@colyseus/sdk";
 import {
@@ -156,6 +156,12 @@ export class MatchScene extends Phaser.Scene {
   // Latest synced SS-charge for the LOCAL player (gates Trojan selection; the
   // server is the real arming authority and rejects an unearned Trojan).
   private localSsCharge = 0;
+  // The LOCAL player's server-synced facing (1 = right toward higher x, -1 =
+  // left toward lower x), captured each patch in syncFromState and used for the
+  // local aim preview, barrel, and fired shot. Replaces the old hardcoded
+  // facing-1 networked approximation so a Team-B player aims/fires toward Team A
+  // (NET-06).
+  private localFacing: 1 | -1 = 1;
   // A terrain snapshot that arrived mid-animation is queued, applied on land.
   private pendingTerrain?: TerrainMask;
   private syncedWind = 0;
@@ -435,7 +441,12 @@ export class MatchScene extends Phaser.Scene {
       }
 
       if (id === state.activePlayer) activeMobile = mobile;
-      if (id === this.sessionId) this.localSsCharge = mobile.ssHitCharge;
+      if (id === this.sessionId) {
+        this.localSsCharge = mobile.ssHitCharge;
+        // Capture the local mobile's authoritative facing for the aim preview,
+        // barrel, streamed aim, and fired shot (NET-06).
+        this.localFacing = mobile.facing >= 0 ? 1 : -1;
+      }
     });
 
     // HUD: wind, the active player's SS-charge + armed, the power meter, and the
@@ -680,7 +691,7 @@ export class MatchScene extends Phaser.Scene {
     if (canInput && view) {
       const dt = dtMs / 1000;
 
-      // Angle (0-90 relative; absolute via local facing approximation +1).
+      // Angle (0-90 relative; absolute via the server-synced localFacing).
       if (this.cursors.up.isDown) {
         this.angleDeg = Math.min(90, this.angleDeg + ANGLE_RATE * dt);
       }
@@ -710,7 +721,11 @@ export class MatchScene extends Phaser.Scene {
         this.power = Phaser.Math.Clamp(this.dragStartPower + delta, 0, 100);
       }
 
-      // Shot select (Trojan only when the synced charge is armed).
+      // Shot select (Trojan only when the synced charge is armed). Capture the
+      // prior pick so we send a selectItem to the server ONLY on an actual
+      // change (NET-02) — a turn-timeout auto-fire (NET-04) then uses the current
+      // pick instead of the Mobile.selectedItemId default shot-1.
+      const priorShotId = this.selectedShotId;
       if (Phaser.Input.Keyboard.JustDown(this.key1)) this.selectedShotId = "shot-1";
       if (Phaser.Input.Keyboard.JustDown(this.key2)) this.selectedShotId = "shot-2";
       if (Phaser.Input.Keyboard.JustDown(this.key3)) {
@@ -720,10 +735,15 @@ export class MatchScene extends Phaser.Scene {
           this.selectedShotId = "trojan";
         }
       }
+      // Send once per real selection change (the gate-rejected trojan leaves
+      // selectedShotId unchanged, so no stray send), and only after connect.
+      if (this.selectedShotId !== priorShotId && this.room) {
+        sendSelectItem(this.room, this.selectedShotId);
+      }
 
       // Aim preview (local cosmetic, ONLY for the local active player). Drive the
-      // local barrel + arc from the absolute angle.
-      const absAngle = this.absoluteAngle(1);
+      // local barrel + arc from the absolute angle (server-synced localFacing).
+      const absAngle = this.absoluteAngle(this.localFacing);
       view.setBarrelAngle(absAngle);
       const muzzle = view.getMuzzle();
       this.aimView.drawLaunchIndicator(muzzle, absAngle, this.power, this.syncedWind);
@@ -774,7 +794,7 @@ export class MatchScene extends Phaser.Scene {
       wind: this.syncedWind,
       gravity: GRAVITY,
       def,
-      facing: 1,
+      facing: this.localFacing,
     });
     aim.x = muzzle.x;
     aim.y = muzzle.y;
@@ -1111,8 +1131,9 @@ export class MatchScene extends Phaser.Scene {
 
   /**
    * Convert the on-screen 0–90 relative aim into the sim's absolute angle for a
-   * given facing (mirror of buildShotInput's rule). Networked mode uses facing 1
-   * locally (the server stores the authoritative facing for the spectator render).
+   * given facing (mirror of buildShotInput's rule). Networked mode passes the
+   * local player's server-synced facing (this.localFacing); the server stores
+   * the authoritative facing that drives the spectator barrel render.
    */
   private absoluteAngle(facing: 1 | -1): number {
     return facing === 1 ? this.angleDeg : 180 - this.angleDeg;
