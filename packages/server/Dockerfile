@@ -23,6 +23,12 @@ COPY packages/convex/package.json packages/convex/
 RUN pnpm install --frozen-lockfile
 
 # --- source layer ---
+# Pitfall 1 (part 2): packages/server/tsconfig.json `extends ../../tsconfig.base.json`.
+# Without the base file in the image the extends chain breaks, tsx silently loses
+# experimentalDecorators, and @colyseus/schema @type() compiles as modern TC39
+# decorators (`__decorateElement`) → boot crash at MatchState import. Copy it to /app
+# so /app/packages/server/tsconfig.json resolves its extends (covers every package).
+COPY tsconfig.base.json ./
 COPY packages/shared packages/shared
 COPY packages/server packages/server
 # Pitfall 7: the committed packages/convex/convex/_generated/ must ship in the image so the
