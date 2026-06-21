@@ -56,6 +56,7 @@ import {
   seatsFull,
   shouldAutoStart,
   timeoutOutcome,
+  forfeitOutcome,
   canFire,
   shouldResolveFire,
   type TurnMobile,
@@ -333,27 +334,131 @@ export class MatchRoom extends Room<{ state: MatchState }> {
     }
   }
 
-  onLeave(client: Client, code?: number): void {
-    console.warn(`[match] ${client.sessionId} left (code ${code ?? "?"})`);
-    // plan 05: delete buckets on removal —
-    //   this.aimBuckets.delete(client.sessionId);
-    //   this.itemBuckets.delete(client.sessionId);
-    // (plan 05 owns the reconnection/abandon lifecycle; the abandon-loss write
-    //  uses `${roomId}:abandon:${accountId}`, distinct from this plan's
-    //  `${roomId}:final:${accountId}`.)
-    // Active-disconnect-during-RESOLVING note (Cursor MEDIUM): if the leaver is
-    // the active player mid-resolve, the in-flight resolveActiveShot already
-    // broadcast its result before any await, so the schema is consistent — the
-    // turn timer / next startTurn carries the match forward. True reconnection
-    // (allowReconnection) is Phase 5; the auto-forfeit timer is the Phase 3
-    // mitigation for a silent/dropped active player.
-    if (
-      client.sessionId === this.state.activePlayer &&
-      this.state.phase === "RESOLVING"
-    ) {
-      console.warn(
-        `[match] active player ${client.sessionId} left during RESOLVING — timer carries the match forward`,
-      );
+  /**
+   * Transport drop (RECON-01) — a client lost its connection (NOT a consented
+   * leave). Grant the 30s reconnection window: flip the synced `connected=false`
+   * so peers render the disconnect, re-publish the listing, then AWAIT
+   * `allowReconnection(client, 30)`.
+   *
+   * Pitfall 2 — cleanup belongs ONLY in the reject branch, NEVER before/around
+   * the await: if the await RESOLVES the client returned (onReconnect resends the
+   * snapshot + flips connected back to true); if it REJECTS the window expired and
+   * we run the single idempotent removeAndForfeit. The connection-independent turn
+   * timer (NET-04) keeps the match advancing while the player is dropped (RECON-03),
+   * so a never-returning drop self-resolves at the window edge with no stall.
+   */
+  async onDrop(client: Client, _code?: number): Promise<void> {
+    const m = this.state.mobiles.get(client.sessionId);
+    if (m) m.connected = false;
+    void this.refreshListing();
+    try {
+      // RECON-01: 30s window (MUST pass the count — never the deprecated no-arg form).
+      await this.allowReconnection(client, 30);
+      // Resolved → the client reconnected; onReconnect handled the snapshot resend.
+    } catch {
+      // Window expired → the single idempotent removal path (Pitfall 2).
+      this.removeAndForfeit(client.sessionId);
+    }
+  }
+
+  /**
+   * Reconnection (RECON-02). The client returned within the 30s window via the
+   * reconnection token (NOT a fresh Clerk auth — onAuth/onJoin do NOT re-run, so
+   * the auth gate from 05-04 is satisfied by the original join). Flip the synced
+   * `connected=true`, RESEND the versioned RLE terrain snapshot as RAW BYTES (the
+   * room's existing sendBytes path — NOT client.send/msgpack), and re-publish the
+   * listing. HP / turn / wind / phase re-sync automatically via the synced state.
+   */
+  onReconnect(client: Client): void {
+    const m = this.state.mobiles.get(client.sessionId);
+    if (m) m.connected = true;
+    // Versioned RLE snapshot resend (plan 01 format) — raw bytes, same path as onJoin.
+    client.sendBytes("terrainSnapshot", encodeMaskRLE(this.terrain));
+    void this.refreshListing();
+  }
+
+  /**
+   * Consented quit OR post-window expiry (H1). Both funnel through the SINGLE
+   * idempotent removeAndForfeit — the fix for the old log-only onLeave that leaked
+   * ghost players. (A transient drop instead routes through onDrop's
+   * allowReconnection window; only a CONSENTED leave reaches here directly.)
+   */
+  onLeave(client: Client, _code?: number): void {
+    this.removeAndForfeit(client.sessionId);
+  }
+
+  /**
+   * The SINGLE idempotent removal path (RECON-04 / H1 / Blocker 5 + Blocker 2).
+   * Called from BOTH the onDrop reject branch AND onLeave. Idempotent via the
+   * `if (!m) return` guard — a second call on an already-removed sessionId is a
+   * no-op (no ghost, no double abandon-loss, no double team-elim).
+   *
+   * STRIPS THE LEAVER FROM EVERY MATCH STRUCTURE (Blocker 5): the synced mobile
+   * (which also removes it from turnView()/advanceTurn/the delay queue, since the
+   * delay state lives in the per-mobile accumulatedDelay), BOTH H4 rate buckets,
+   * the private identity map, and the active-player slot + turn timer when the
+   * leaver was the active player.
+   *
+   * DOES NOT UNLOCK (Blocker 5): an in-progress room stays LOCKED. Freeing a seat
+   * means "no leak", NEVER "admit a replacement".
+   *
+   * RECORDS THE ABANDON (Blocker 2): an explicit `abandon_loss` with a GRANULAR
+   * `${roomId}:abandon:${accountId}` id (distinct from endMatch's
+   * `${roomId}:final:${accountId}`), so the abandon write and the final write
+   * never collide and a retry is a Convex no-op.
+   */
+  private removeAndForfeit(sessionId: string): void {
+    const m = this.state.mobiles.get(sessionId);
+    if (!m) return; // idempotency guard (H1) — already removed.
+
+    const accountId = this.accountIds.get(sessionId);
+    const wasInProgress =
+      this.state.phase !== "RESULTS" && this.state.phase !== "WAITING";
+    const wasActive = sessionId === this.state.activePlayer;
+
+    // Decide team-elimination with the PURE helper BEFORE mutating state.
+    const { outcome } = forfeitOutcome(this.turnView(), sessionId);
+
+    // STRIP FROM ALL MATCH STRUCTURES (Blocker 5).
+    this.state.mobiles.delete(sessionId);
+    this.aimBuckets.delete(sessionId);
+    this.itemBuckets.delete(sessionId);
+    this.accountIds.delete(sessionId);
+    if (wasActive) {
+      // Clear the stale active slot + its timer so it never points at a removed mobile.
+      this.turnTimer?.clear();
+      this.state.activePlayer = "";
+    }
+
+    // DO NOT UNLOCK (Blocker 5) — the in-progress room stays locked; only republish.
+    void this.refreshListing();
+
+    // RECORD THE ABANDON-LOSS (Blocker 2) — only for an in-progress match with a
+    // bound accountId. Explicit `abandon_loss` + granular `${roomId}:abandon:${accountId}`.
+    if (wasInProgress && accountId) {
+      recordMatchResult({
+        winnerTeam: outcome.kind === "winner" ? outcome.team : -1,
+        resultId: `${this.roomId}:abandon:${accountId}`,
+        players: [
+          {
+            accountId,
+            outcome: "abandon_loss",
+            resultId: `${this.roomId}:abandon:${accountId}`,
+          },
+        ],
+      });
+    }
+
+    // APPLY THE TEAM-ELIM / TURN-ADVANCE OUTCOME. Every branch is safe to call
+    // twice (the `if (!m) return` guard above makes the whole method idempotent).
+    if (outcome.kind === "winner") {
+      this.endMatch(outcome.team);
+    } else if (outcome.kind === "draw") {
+      this.endMatchDraw();
+    } else if (wasActive) {
+      // continue + the leaver was the active player → advance the turn. The timer
+      // was cleared above; startTurn picks the next active off the smaller turnView().
+      this.startTurn();
     }
   }
 
