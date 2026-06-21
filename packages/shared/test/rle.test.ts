@@ -3,6 +3,9 @@ import {
   TerrainMask,
   encodeMaskRLE,
   decodeMaskRLE,
+  RLE_HEADER_BYTES,
+  RLE_MAGIC_BYTES,
+  RLE_VERSION,
 } from "../src/index.js";
 import type { MapDef } from "../src/types.js";
 
@@ -63,34 +66,43 @@ describe("encodeMaskRLE / decodeMaskRLE round-trip (NET-05)", () => {
 describe("rle decode corrupt-input guards (Agreed Concern #7)", () => {
   it("decodeMaskRLE throws on a truncated buffer", () => {
     const encoded = encodeMaskRLE(TerrainMask.fromMap(MAP));
-    // Keep the 8-byte header but drop the run bytes, so the runs cannot fill
-    // width*height.
-    const truncated = encoded.slice(0, 9);
+    // Keep the full RLE_HEADER_BYTES header but drop the run bytes, so the runs
+    // cannot fill width*height.
+    const truncated = encoded.slice(0, RLE_HEADER_BYTES + 1);
     expect(() => decodeMaskRLE(truncated)).toThrow();
   });
 
   it("decodeMaskRLE rejects a sub-header buffer", () => {
     // Short-header guard fires BEFORE any read of the LE dimensions.
-    expect(() => decodeMaskRLE(new Uint8Array(4))).toThrow(/8-byte header/);
+    expect(() => decodeMaskRLE(new Uint8Array(RLE_HEADER_BYTES - 1))).toThrow(
+      /header/,
+    );
   });
 
   it("decodeMaskRLE rejects over-bounds dimensions", () => {
-    // Hand-craft a header claiming 9999x9999 (LE uint32s) + a trivial run byte.
-    // The allocation cap must fire BEFORE allocating ~100M cells.
-    const bad = new Uint8Array(9);
+    // Hand-craft a valid magic+version header claiming 9999x9999 (LE uint32s) +
+    // a trivial run byte. The allocation cap must fire BEFORE allocating ~100M
+    // cells.
+    const bad = new Uint8Array(RLE_HEADER_BYTES + 1);
+    bad[0] = RLE_MAGIC_BYTES[0];
+    bad[1] = RLE_MAGIC_BYTES[1];
+    bad[2] = RLE_VERSION;
     const view = new DataView(bad.buffer);
-    view.setUint32(0, 9999, true);
-    view.setUint32(4, 9999, true);
-    bad[8] = 0;
+    view.setUint32(3, 9999, true);
+    view.setUint32(7, 9999, true);
+    bad[RLE_HEADER_BYTES] = 0;
     expect(() => decodeMaskRLE(bad)).toThrow(/exceed map bounds/);
   });
 
   it("decodeMaskRLE rejects non-positive dimensions", () => {
-    const bad = new Uint8Array(9);
+    const bad = new Uint8Array(RLE_HEADER_BYTES + 1);
+    bad[0] = RLE_MAGIC_BYTES[0];
+    bad[1] = RLE_MAGIC_BYTES[1];
+    bad[2] = RLE_VERSION;
     const view = new DataView(bad.buffer);
-    view.setUint32(0, 0, true); // width = 0
-    view.setUint32(4, 48, true);
-    bad[8] = 0;
+    view.setUint32(3, 0, true); // width = 0
+    view.setUint32(7, 48, true);
+    bad[RLE_HEADER_BYTES] = 0;
     expect(() => decodeMaskRLE(bad)).toThrow(/non-positive/);
   });
 });

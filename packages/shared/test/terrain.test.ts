@@ -1,5 +1,14 @@
 import { describe, it, expect } from "vitest";
-import { TerrainMask, quantizeCarve } from "../src/terrain.js";
+import {
+  TerrainMask,
+  quantizeCarve,
+  encodeMaskRLE,
+  decodeMaskRLE,
+  RLE_MAGIC_BYTES,
+  RLE_VERSION,
+  RLE_HEADER_BYTES,
+  RLE_MAX_ENCODED_BYTES,
+} from "../src/terrain.js";
 import type { MapDef } from "../src/types.js";
 
 // SIM-02 suite (Phase 1, plan 02). Proves: carve removes a circular chunk, the
@@ -94,5 +103,94 @@ describe("floor-vs-round sampling relationship (documented ~1px skew)", () => {
     // The two intentionally differ by ~1px. This locks the documented behavior:
     // a future change to either rule trips this assertion.
     expect(carve.cx).not.toBe(Math.floor(fx));
+  });
+});
+
+// Review M4 / RECON-02: the RLE codec carries a magic + version + dimensions
+// header and a run-count + encoded-size cap so a cross-build reconnect snapshot
+// (Phase 5) is self-validating and a hostile/corrupt buffer is rejected loudly
+// rather than silently decoded into a wrong collision mask. Bare-Node (no jsdom)
+// — the codec stays pure so the SIM-04 purity gate is unaffected.
+describe("RLE version + header hardening (M4 / RECON-02)", () => {
+  const MAP: MapDef = {
+    width: 64,
+    height: 48,
+    seed: 3,
+    baseHeight: 24,
+    amplitude: 8,
+    frequency: 0.1,
+  };
+
+  /** Index of the first run-section byte that begins run #2 (skips the header
+   *  and the first LEB128 varint). Used to splice an interior zero-length run. */
+  function secondRunOffset(encoded: Uint8Array): number {
+    let cursor = RLE_HEADER_BYTES;
+    // Skip the first varint (advance past all continuation bytes).
+    while ((encoded[cursor] & 0x80) !== 0) cursor++;
+    cursor++; // the terminating (high-bit-clear) byte of run #1
+    return cursor;
+  }
+
+  it("encodes a magic + version header and round-trips byte-identically", () => {
+    const original = TerrainMask.fromMap(MAP);
+    const encoded = encodeMaskRLE(original);
+
+    expect(encoded[0]).toBe(RLE_MAGIC_BYTES[0]);
+    expect(encoded[1]).toBe(RLE_MAGIC_BYTES[1]);
+    expect(encoded[2]).toBe(RLE_VERSION);
+
+    const decoded = decodeMaskRLE(encoded);
+    expect(decoded.width).toBe(original.width);
+    expect(decoded.height).toBe(original.height);
+    expect(Array.from(decoded.bits)).toEqual(Array.from(original.bits));
+  });
+
+  it("rejects a buffer with bad magic", () => {
+    const bad = encodeMaskRLE(TerrainMask.fromMap(MAP));
+    bad[0] = 0x00;
+    expect(() => decodeMaskRLE(bad)).toThrow(/magic/);
+  });
+
+  it("rejects an unsupported version", () => {
+    const bad = encodeMaskRLE(TerrainMask.fromMap(MAP));
+    bad[2] = 99;
+    expect(() => decodeMaskRLE(bad)).toThrow(/version/);
+  });
+
+  it("rejects oversize dimensions (valid magic+version, huge w/h)", () => {
+    const bad = new Uint8Array(RLE_HEADER_BYTES + 1);
+    bad[0] = RLE_MAGIC_BYTES[0];
+    bad[1] = RLE_MAGIC_BYTES[1];
+    bad[2] = RLE_VERSION;
+    const view = new DataView(bad.buffer);
+    view.setUint32(3, 9999, true);
+    view.setUint32(7, 9999, true);
+    expect(() => decodeMaskRLE(bad)).toThrow(/bounds|dimensions/);
+  });
+
+  it("rejects a short (sub-header) buffer", () => {
+    expect(() => decodeMaskRLE(new Uint8Array(RLE_HEADER_BYTES - 1))).toThrow(
+      /header/,
+    );
+  });
+
+  it("rejects a buffer past the encoded-size cap (M4)", () => {
+    const bad = new Uint8Array(RLE_MAX_ENCODED_BYTES + 1);
+    bad[0] = RLE_MAGIC_BYTES[0];
+    bad[1] = RLE_MAGIC_BYTES[1];
+    bad[2] = RLE_VERSION;
+    expect(() => decodeMaskRLE(bad)).toThrow(/size cap/);
+  });
+
+  it("rejects an interior zero-length run (M4)", () => {
+    const encoded = encodeMaskRLE(TerrainMask.fromMap(MAP));
+    const splice = secondRunOffset(encoded);
+    // Insert a zero LEB128 varint (0x00) as an INTERIOR run (run #2). Only the
+    // FIRST run may legitimately be zero (the leading-solid case).
+    const bad = new Uint8Array(encoded.length + 1);
+    bad.set(encoded.subarray(0, splice), 0);
+    bad[splice] = 0x00;
+    bad.set(encoded.subarray(splice), splice + 1);
+    expect(() => decodeMaskRLE(bad)).toThrow(/zero-length/);
   });
 });
