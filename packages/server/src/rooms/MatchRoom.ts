@@ -31,7 +31,7 @@
  *   - `this.clock.setTimeout(...)` returning a `Delayed` cleared via `.clear()`.
  *   - `onLeave(client, code?: number)` (NOT consented: boolean).
  */
-import { Room, Client, validate } from "@colyseus/core";
+import { Room, Client, validate, updateLobby } from "@colyseus/core";
 import { TerrainMask, encodeMaskRLE, muzzleOffset, LOADOUT } from "@shared/sim";
 import type { ProjectileDef, ShotInput } from "@shared/sim";
 import { MatchState, Mobile } from "./schema/MatchState.js";
@@ -43,7 +43,8 @@ import {
   WIND_MAX,
   GRAVITY,
   SS_HITS_TO_ARM,
-  MATCH_CONFIG,
+  teamSizeForMode,
+  type MatchMode,
   resolveDwellMs,
 } from "../config.js";
 import { MAP, spawnLayout, surfaceY, settledY } from "../match/world.js";
@@ -53,6 +54,7 @@ import {
   checkWinTeam,
   assignTeam,
   seatsFull,
+  shouldAutoStart,
   timeoutOutcome,
   canFire,
   shouldResolveFire,
@@ -62,11 +64,24 @@ import {
   fireSchema,
   aimSchema,
   selectItemSchema,
+  readySchema,
   type FireMessage,
   type AimMessage,
   type SelectItemMessage,
+  type ReadyMessage,
 } from "../match/messageSchemas.js";
 import { recordMatchResult } from "../meta/results.js";
+import { verifyClerk } from "../auth/clerk.js";
+import { getConvex, api } from "../meta/convexClient.js";
+import {
+  TokenBucket,
+  withinSizeLimit,
+  MAX_MESSAGE_BYTES,
+  AIM_BUCKET_CAPACITY,
+  AIM_BUCKET_REFILL_PER_SEC,
+  ITEM_BUCKET_CAPACITY,
+  ITEM_BUCKET_REFILL_PER_SEC,
+} from "../ratelimit/tokenBucket.js";
 
 export class MatchRoom extends Room<{ state: MatchState }> {
   /** The authoritative collision mask — room memory ONLY, never a @type() field. */
@@ -85,6 +100,39 @@ export class MatchRoom extends Room<{ state: MatchState }> {
    * best-effort drain so a deploy does not SILENTLY kill a live match.
    */
   draining = false;
+
+  /**
+   * Per-room mode + derived team size (LOBBY-03). Mode is a CREATE OPTION (no
+   * longer the global `MATCH_CONFIG` constant); `teamSize` = `teamSizeForMode`,
+   * so total seats = `teamSize * 2` and `this.maxClients` is set to that in
+   * onCreate. Defaults cover a create with no options (local two-tab 1v1).
+   */
+  private mode: MatchMode = "1v1";
+  private teamSize = 1;
+  // NOTE: distinct from the base Room.roomName (the registered handler id "match").
+  // This is the human-facing lobby label; do NOT name it `roomName` — shadowing the
+  // base field as private breaks updateLobby(this)'s `Room` structural type.
+  private lobbyName = "ROOM";
+
+  /**
+   * PRIVATE server-side identity binding (Blocker 1): sessionId → verified Clerk
+   * accountId (the `sub`). Used ONLY for server-side W/L attribution at match
+   * end. NEVER a synced `@type()` field, NEVER broadcast — the public handle is
+   * the synced `Mobile.displayName`, not this.
+   */
+  private accountIds = new Map<string, string>();
+
+  /**
+   * H4 per-sessionId rate limiters — SEPARATE buckets for the high-frequency
+   * `aim` stream and the low-frequency `selectItem` (review LOW). Lazily created
+   * per session, fed by `this.clock.currentTime` (the room clock, never an
+   * ambient wall clock), and combined
+   * with a per-message size cap. Over-rate / oversize messages are DROPPED and
+   * counted in `rejections`.
+   */
+  private aimBuckets = new Map<string, TokenBucket>();
+  private itemBuckets = new Map<string, TokenBucket>();
+  private rejections = 0;
 
   /**
    * Inbound message map (NET-02 gate + NET-07 validation). Each handler is
@@ -107,49 +155,132 @@ export class MatchRoom extends Room<{ state: MatchState }> {
       (client: Client, payload: SelectItemMessage) =>
         this.onSelectItem(client, payload),
     ),
+    // Lobby ready toggle (LOBBY-04). The intent is the message name; the empty
+    // schema rejects any unexpected payload. Auto-start (no manual master Start)
+    // is gated on full && all-ready.
+    ready: validate(readySchema, (client: Client, _payload: ReadyMessage) =>
+      this.setReady(client.sessionId, true),
+    ),
+    unready: validate(readySchema, (client: Client, _payload: ReadyMessage) =>
+      this.setReady(client.sessionId, false),
+    ),
   };
 
-  onCreate(): void {
+  async onCreate(options?: { name?: string; mode?: MatchMode }): Promise<void> {
     this.state = new MatchState();
     // Authoritative mask in room memory ONLY (Pitfall 4 / NET-05). Built from
     // the server MAP — byte-identical to the client world.ts so carves replay
     // identically on every client.
     this.terrain = TerrainMask.fromMap(MAP);
+
+    // Per-room mode (LOBBY-03). Mode is a CREATE OPTION; teamSize is derived and
+    // total seats = teamSize * 2. maxClients makes Colyseus itself cap seats —
+    // the onJoin overflow guard is the explicit reject on top of it.
+    this.mode = options?.mode ?? "1v1";
+    this.teamSize = teamSizeForMode(this.mode);
+    this.lobbyName = options?.name ?? "ROOM";
+    this.maxClients = this.teamSize * 2;
+
+    // Publish initial joinable metadata so the live lobby list shows this open
+    // room (LOBBY-01/02). CRITICAL (Pitfall 1): setMetadata alone does NOT notify
+    // the lobby — always follow it with updateLobby(this).
+    await this.setMetadata({
+      name: this.lobbyName,
+      mode: this.mode,
+      map: "default",
+      players: 0,
+      maxPlayers: this.teamSize * 2,
+      readyCount: 0,
+      locked: false,
+      phase: "WAITING",
+    });
+    updateLobby(this);
   }
 
   /**
-   * Stub identity handshake (Plan 02) — a per-session guest accountId becomes
-   * `client.auth.accountId`. Real Clerk verifyToken is Phase 5.
+   * Re-publish the current joinable metadata to the lobby (LOBBY-01/02). Called
+   * after EVERY seat / ready / lock / phase change so the live list stays
+   * accurate. `locked` is true once the match has started (phase past WAITING) OR
+   * the room is full — a full-but-not-ready room is removed from matchmaking.
+   *
+   * Pitfall 1: setMetadata alone does NOT notify the lobby — always followed by
+   * updateLobby(this).
+   */
+  private async refreshListing(): Promise<void> {
+    let readyCount = 0;
+    this.state.mobiles.forEach((m) => {
+      if (m.ready) readyCount++;
+    });
+    const players = this.state.mobiles.size;
+    const locked =
+      this.state.phase !== "WAITING" || seatsFull(players, this.teamSize);
+    await this.setMetadata({
+      name: this.lobbyName,
+      mode: this.mode,
+      map: "default",
+      players,
+      maxPlayers: this.teamSize * 2,
+      readyCount,
+      locked,
+      phase: this.state.phase,
+    });
+    updateLobby(this);
+  }
+
+  /**
+   * Real identity handshake (Plan 04, AUTH-03 + Blocker 1). The Clerk token
+   * arrives in the JOIN OPTIONS (browsers cannot set WS request headers, so the
+   * token is NEVER read from headers), is verified via the SHARED `verifyClerk`
+   * seam (one token, two consumers — same wrapper as the Meta-API routes), and
+   * resolves to the verified `sub` as the accountId. The PUBLIC display handle is
+   * loaded server-side from `accounts.display_name`. Both ride on `client.auth`
+   * so onJoin can bind the PRIVATE accountId and sync the PUBLIC displayName.
+   *
+   * On a missing or invalid token this throws — Colyseus rejects the join
+   * (T-05-AUTH-04: no impersonation, accountId = verified sub, never client
+   * supplied).
    */
   async onAuth(
-    client: Client,
-    _options: unknown,
+    _client: Client,
+    options: { token?: string } | undefined,
     _context: unknown,
-  ): Promise<{ accountId: string }> {
-    return { accountId: `guest-${client.sessionId}` };
+  ): Promise<{ accountId: string; displayName: string }> {
+    if (!options?.token) throw new Error("auth required");
+    const { accountId } = await verifyClerk(options.token);
+    // Public handle = accounts.display_name (Blocker 1). Falls back to a generic
+    // label if the account row has no name yet.
+    const row = await getConvex().query(api.accounts.getByAuthUserId, {
+      authUserId: accountId,
+    });
+    const displayName = row?.display_name ?? "AGENT";
+    return { accountId, displayName };
   }
 
   /**
-   * NET-05: terrain snapshot + auto-balance + auto-start + full-room lock.
-   * Overflow joiners are rejected (Agreed Concern #3 / Authority Decision 3).
+   * NET-05 + LOBBY-03/04: terrain snapshot + auto-balance + lock-on-full +
+   * identity bind. Overflow joiners are rejected (Agreed Concern #3 / Authority
+   * Decision 3); maxClients is the primary cap (set in onCreate), this guard is
+   * the explicit deterministic reject. NOTE: the match no longer auto-starts on
+   * full — it waits for full && all-ready (see setReady).
    */
   onJoin(client: Client): void {
-    // Overflow guard FIRST — a third tab in 1v1 (or beyond teamSize*2) is
-    // rejected with a logged normal-close leave, before any seat is created.
-    if (seatsFull(this.state.mobiles.size, MATCH_CONFIG.teamSize)) {
+    // Overflow guard FIRST — a late join into a FULL room is rejected with a
+    // logged normal-close leave, before any seat is created, regardless of ready
+    // state (a full-but-not-ready room admits NO further clients).
+    if (seatsFull(this.state.mobiles.size, this.teamSize)) {
       console.warn(
-        `[match] full (${MATCH_CONFIG.teamSize * 2} seats) — rejecting ${client.sessionId}`,
+        `[match] full (${this.teamSize * 2} seats) — rejecting ${client.sessionId}`,
       );
       client.leave(1000);
       return;
     }
 
     const joinOrder = this.state.mobiles.size;
-    const team = assignTeam(joinOrder, MATCH_CONFIG.teamSize);
+    const team = assignTeam(joinOrder, this.teamSize);
 
     // Seat from the server spawn layout (mask surface Y). The layout fills in
     // JOIN order A,B,A,B… so layout[joinOrder] aligns with assignTeam(joinOrder).
-    const seats = spawnLayout(this.terrain, MATCH_CONFIG.teamSize);
+    const seats = spawnLayout(this.terrain, this.teamSize);
     const seat = seats[joinOrder];
 
     const mobile = new Mobile();
@@ -159,21 +290,57 @@ export class MatchRoom extends Room<{ state: MatchState }> {
     mobile.x = seat.x;
     mobile.y = seat.y;
     mobile.hp = 100;
+    // PUBLIC handle (Blocker 1): the name shown to peers, from accounts.display_name.
+    mobile.displayName = client.auth.displayName ?? "AGENT";
     this.state.mobiles.set(client.sessionId, mobile);
+
+    // PRIVATE identity bind (Blocker 1): sessionId → verified Clerk accountId.
+    // Server-side ONLY — never synced, never broadcast. Used for W/L attribution.
+    this.accountIds.set(client.sessionId, client.auth.accountId);
 
     // One-time RLE terrain snapshot as RAW BYTES (NET-05). sendBytes keeps the
     // bytes intact; client.send would msgpack-encode and corrupt them.
     client.sendBytes("terrainSnapshot", encodeMaskRLE(this.terrain));
 
-    // Lock + auto-start the moment every seat is filled (Authority Decision 3).
-    if (seatsFull(this.state.mobiles.size, MATCH_CONFIG.teamSize)) {
+    // LOCK ON FULL (LOBBY-03): a full room is removed from matchmaking the moment
+    // every seat is filled — even before it is all-ready. The match START is
+    // gated separately on full && all-ready (setReady), NOT here.
+    if (seatsFull(this.state.mobiles.size, this.teamSize)) {
       void this.lock();
+    }
+
+    // Re-publish the live metadata (players/readyCount/locked) to the lobby.
+    void this.refreshListing();
+  }
+
+  /**
+   * Lobby ready toggle (LOBBY-04). Acts ONLY in WAITING; flips the mobile's
+   * synced `ready`, re-publishes the listing, then auto-starts when the room is
+   * full && every mobile is ready — there is NO manual master Start. The room is
+   * ALREADY locked on full (onJoin), so this never re-locks; it only starts.
+   */
+  private setReady(sessionId: string, ready: boolean): void {
+    if (this.state.phase !== "WAITING") return;
+    const mobile = this.state.mobiles.get(sessionId);
+    if (!mobile) return;
+    mobile.ready = ready;
+    void this.refreshListing();
+
+    const flags: boolean[] = [];
+    this.state.mobiles.forEach((m) => flags.push(m.ready));
+    if (shouldAutoStart(this.state.mobiles.size, this.teamSize, flags)) {
       this.startTurn();
     }
   }
 
   onLeave(client: Client, code?: number): void {
     console.warn(`[match] ${client.sessionId} left (code ${code ?? "?"})`);
+    // plan 05: delete buckets on removal —
+    //   this.aimBuckets.delete(client.sessionId);
+    //   this.itemBuckets.delete(client.sessionId);
+    // (plan 05 owns the reconnection/abandon lifecycle; the abandon-loss write
+    //  uses `${roomId}:abandon:${accountId}`, distinct from this plan's
+    //  `${roomId}:final:${accountId}`.)
     // Active-disconnect-during-RESOLVING note (Cursor MEDIUM): if the leaver is
     // the active player mid-resolve, the in-flight resolveActiveShot already
     // broadcast its result before any await, so the schema is consistent — the
@@ -216,7 +383,43 @@ export class MatchRoom extends Room<{ state: MatchState }> {
     this.resolveActiveShot(mobile, payload.angleDeg, payload.power, payload.itemId);
   }
 
+  /**
+   * H4 per-sessionId rate + size guard (T-05-H4-02). Lazily creates the bucket
+   * for this session in the given map, drops the message if the serialized
+   * (already-decoded) payload exceeds MAX_MESSAGE_BYTES or the bucket is empty,
+   * and counts every drop in `rejections`. This is an APP-LEVEL abuse guard on
+   * the decoded handler payload — NOT a transport byte ceiling. The bucket is fed
+   * by `this.clock.currentTime` (the deterministic room clock), never an ambient
+   * wall clock.
+   */
+  private allow(
+    map: Map<string, TokenBucket>,
+    sessionId: string,
+    raw: unknown,
+    cap: number,
+    refill: number,
+  ): boolean {
+    let bucket = map.get(sessionId);
+    if (!bucket) {
+      bucket = new TokenBucket(cap, refill, this.clock.currentTime);
+      map.set(sessionId, bucket);
+    }
+    const size = JSON.stringify(raw ?? {}).length;
+    if (!withinSizeLimit(size, MAX_MESSAGE_BYTES)) {
+      this.rejections++;
+      return false;
+    }
+    if (!bucket.take(this.clock.currentTime)) {
+      this.rejections++;
+      return false;
+    }
+    return true;
+  }
+
   private onAim(client: Client, payload: AimMessage): void {
+    // H4 (review LOW): high-frequency aim bucket + size cap; drop over-rate/oversize.
+    const aimOk = this.allow(this.aimBuckets, client.sessionId, payload, AIM_BUCKET_CAPACITY, AIM_BUCKET_REFILL_PER_SEC);
+    if (!aimOk) return;
     if (!canFire(this.state.phase, client.sessionId, this.state.activePlayer)) {
       return;
     }
@@ -233,6 +436,9 @@ export class MatchRoom extends Room<{ state: MatchState }> {
   }
 
   private onSelectItem(client: Client, payload: SelectItemMessage): void {
+    // H4 (review LOW): low-frequency item bucket + size cap; drop over-rate/oversize.
+    const itemOk = this.allow(this.itemBuckets, client.sessionId, payload, ITEM_BUCKET_CAPACITY, ITEM_BUCKET_REFILL_PER_SEC);
+    if (!itemOk) return;
     if (!canFire(this.state.phase, client.sessionId, this.state.activePlayer)) {
       return;
     }
@@ -432,13 +638,49 @@ export class MatchRoom extends Room<{ state: MatchState }> {
     }
   }
 
+  /**
+   * Build the per-player EXPLICIT-OUTCOME results payload (AUTH-05, Blocker 2).
+   * Each seated mobile with a bound accountId gets an explicit win/loss/draw —
+   * NEVER a boolean `won`, so a draw is `draw` (neither), never a mis-encoded
+   * loss. Each player carries a GRANULAR `${roomId}:final:${accountId}` id (so
+   * Convex dedups per player+event), plus the top-level EVENT id `${roomId}:final`.
+   *
+   * `winnerTeam === -1` is the draw sentinel. Plan 05's abandon-loss path uses
+   * the SEPARATE `${roomId}:abandon:${accountId}` id, so the two never collide.
+   */
+  private finalResultsPayload(winnerTeam: number): {
+    winnerTeam: number;
+    resultId: string;
+    players: { accountId: string; outcome: "win" | "loss" | "draw"; resultId: string }[];
+  } {
+    const players: {
+      accountId: string;
+      outcome: "win" | "loss" | "draw";
+      resultId: string;
+    }[] = [];
+    this.state.mobiles.forEach((m) => {
+      const accountId = this.accountIds.get(m.sessionId);
+      if (!accountId) return;
+      const outcome: "win" | "loss" | "draw" =
+        winnerTeam === -1 ? "draw" : m.team === winnerTeam ? "win" : "loss";
+      players.push({
+        accountId,
+        outcome,
+        resultId: `${this.roomId}:final:${accountId}`,
+      });
+    });
+    return { winnerTeam, resultId: `${this.roomId}:final`, players };
+  }
+
   private endMatch(winnerTeam: number): void {
     this.state.phase = "RESULTS";
     this.state.winnerTeam = winnerTeam;
     this.broadcast("matchEnded", { winnerTeam });
-    // In-process authoritative write (review H7 preferred path). The roomId is a
-    // stable per-match idempotency key so a re-record is a no-op.
-    recordMatchResult({ winnerTeam, resultId: this.roomId });
+    // In-process authoritative write (review H7 preferred path) with per-player
+    // EXPLICIT outcomes + granular per-player+event ids (Blocker 2) so a re-record
+    // is a no-op and never collides with plan 05's abandon write.
+    recordMatchResult(this.finalResultsPayload(winnerTeam));
+    void this.refreshListing();
   }
 
   /** Simultaneous-wipe draw (Codex MEDIUM) — winnerTeam -1 sentinel, never silent. */
@@ -446,7 +688,8 @@ export class MatchRoom extends Room<{ state: MatchState }> {
     this.state.phase = "RESULTS";
     this.state.winnerTeam = -1;
     this.broadcast("matchEnded", { winnerTeam: -1, draw: true });
-    recordMatchResult({ winnerTeam: -1, resultId: this.roomId });
+    recordMatchResult(this.finalResultsPayload(-1));
+    void this.refreshListing();
   }
 
   /**

@@ -65,6 +65,20 @@ export class Mobile extends Schema {
    * true this phase.
    */
   @type("boolean") connected = true;
+  /**
+   * Lobby READY flag (Plan 04, LOBBY-04). A seated player toggles this in the
+   * WAITING phase; the room auto-starts only when full && every mobile is ready.
+   * Reset to its default each match.
+   */
+  @type("boolean") ready = false;
+  /**
+   * PUBLIC display handle (Blocker 1) — the name shown to OTHER players (turn
+   * list + nameplate), loaded server-side from `accounts.display_name` in
+   * `onAuth`. This is the ONLY identity field that crosses the wire. The Clerk
+   * `sub`/accountId is held in a PRIVATE server-side `Map<sessionId, accountId>`
+   * on the room and is NEVER a `@type()` field, NEVER synced, NEVER broadcast.
+   */
+  @type("string") displayName = "";
 
   // moveBudget intentionally NOT synced — movement is client-local cosmetic this
   // phase; server authority covers fire/HP/terrain/turn only (Authority

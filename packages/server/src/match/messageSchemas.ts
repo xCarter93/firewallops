@@ -50,6 +50,15 @@ export const selectItemSchema = z.object({
 });
 export type SelectItemMessage = z.infer<typeof selectItemSchema>;
 
+/**
+ * `ready` / `unready` (Plan 04, LOBBY-04): a seated player toggles their lobby
+ * ready flag in the WAITING phase. The intent IS the message name (ready vs
+ * unready) — the body carries no fields, so an empty-object schema both rejects
+ * any unexpected payload and keeps the validate(schema, handler) wiring uniform.
+ */
+export const readySchema = z.object({});
+export type ReadyMessage = z.infer<typeof readySchema>;
+
 /** Per-player explicit OUTCOME enum (Phase-5 Blocker 2 — NO boolean `won`). */
 export const OUTCOMES = ["win", "loss", "draw", "abandon_loss"] as const;
 
