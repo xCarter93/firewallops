@@ -6,29 +6,42 @@ import {
   type LobbyRoomEntry,
   type LobbySubscription,
 } from "../net/lobbyClient.js";
+import { FONT, chamfer, angledTab, edgeBar } from "../meshed.js";
 
 /**
- * Lobby / Home Hub page (Design screen 03, UI-SPEC #4) — the discovery surface
- * (Phase 5, Plan 08, LOBBY-01/02/03 + AUTH-02/04).
+ * Lobby / Home Hub page — restyled to the founder's NEW Meshed "Home Hub"
+ * command-center (Phase 6, Plan 06-MESHED-B). It consumes the shared Meshed
+ * foundation (`shell/meshed.ts` motifs + the shell.css `--*` tokens + the fonts
+ * loaded in index.html) — CHAMFER frames, ANGLED-TAB nav/pills, EDGE-BAR rails —
+ * exactly as the landing page does. The layout follows MESHED-DESIGN "SCREEN 2 —
+ * HOME HUB": a left command sidebar, a center QUICK MATCH hero + mode cards + the
+ * live ROOM BROWSER + an INTEL FEED, and a right SQUAD panel.
  *
- * Trimmed to v0 scope (UI-SPEC scope-trim): a live LobbyRoom-driven room browser
- * (create/join), the player's profile block (display name + W/L only), and the
- * first-login handle prompt. OMITTED per scope-trim: credits/KEYS/STORE/economy,
- * XP/rank/season/INTEL FEED, SQUAD/friends. The map is a single-option stub.
- *
- * Connections:
+ * LIVE WIRING — preserved byte-for-byte from the Phase-5 lobby (this is a
+ * PRESENTATIONAL restyle wrapping the same logic; the lobby→staging→start flow
+ * repaired in d726c39 is untouched):
  *   - The live room list comes from `subscribeLobby` (a SEPARATE light LobbyRoom
- *     connection — NOT a match seat).
- *   - CREATE ROOM creates a MatchRoom THROUGH the single-owner `matchSession`
- *     (Blocker 3), then navigates to `/room/:id` (the room page rejoins that same
- *     connection idempotently — no second seat).
+ *     connection — NOT a match seat). The ROOM BROWSER region reuses
+ *     `renderRooms`/`renderRoomRow`/`renderEmptyState`.
+ *   - CREATE ROOM / the QUICK MATCH hero DEPLOY CTA + the mode cards all route
+ *     through the SAME `openCreateForm()` → `matchSession.create` (Blocker 3),
+ *     then navigate to `/room/:id` (no new join path is invented).
  *   - The profile block + handle write hit the DISTINCT REST Meta-API
  *     (`SERVER_HTTP_URL` + `/internal/profile`) with the Clerk Bearer token.
  *   - LOG OUT is the mounted Clerk `UserButton` (AUTH-02).
  *
+ * REAL vs ILLUSTRATIVE (founder policy): the seated player's profile DISPLAY NAME
+ * + W/L are REAL (from `fetchProfile`, UI-04 partial) and rendered truthfully. The
+ * no-backend sections (rank/level/XP, CR/KEYS currency, SQUAD friends, INTEL FEED
+ * news/events) have NO data source — they render as clearly-labelled STATIC
+ * ILLUSTRATIVE chrome (a `// ILLUSTRATIVE` marker per section + a visible `SYS`
+ * tag), consistent with the landing stat-band convention. Numeric fields with no
+ * source and no illustrative frame render a muted "—" (never an invented number).
+ *
  * Lifecycle: `renderLobby` returns a cleanup fn the router can call on nav-away;
  * it also self-cleans on navigation via the page's own `navigate` wrapper so the
- * lobby subscription never leaks a connection.
+ * lobby subscription never leaks a connection. NO `#game-container` is created
+ * here (the canvas-lifecycle smoke invariant).
  */
 
 /** The profile row shape returned by `GET /internal/profile` (Convex account row or null). */
@@ -115,130 +128,500 @@ export function renderLobby(
     navigate(path);
   };
 
-  // ── page shell ──────────────────────────────────────────────────────────
+  // ── page shell (Meshed field + faint cyan mesh texture) ───────────────────
   const page = el("div", "fw-lobby");
   Object.assign(page.style, {
     minHeight: "100%",
-    background: "var(--bg)",
+    height: "100%",
+    background: "var(--bg-deep)", // Meshed field #0B1220
+    backgroundImage:
+      "linear-gradient(rgba(34,211,238,0.03) 1px, transparent 1px), " +
+      "linear-gradient(90deg, rgba(34,211,238,0.03) 1px, transparent 1px)",
+    backgroundSize: "48px 48px",
     fontFamily: "var(--font-body)",
+    color: "var(--text-2)",
+    display: "flex",
+  } satisfies Partial<CSSStyleDeclaration>);
+
+  // ════════════════════════════════════════════════════════════════════════
+  //  LEFT SIDEBAR — brand · profile (REAL name + W/L) · nav · settings/log-out
+  // ════════════════════════════════════════════════════════════════════════
+  const sidebar = el("aside", "fw-hub-sidebar");
+  Object.assign(sidebar.style, {
+    width: "252px",
+    flex: "none",
+    background: "linear-gradient(180deg,#0d1626,#0a1220)",
+    borderRight: "1px solid rgba(95,200,245,0.14)",
     display: "flex",
     flexDirection: "column",
+    padding: "22px 0",
   } satisfies Partial<CSSStyleDeclaration>);
 
-  // ── top bar: brand · profile (display name + W/L) · Clerk UserButton ──────
-  const topbar = el("header", "fw-lobby-topbar");
-  Object.assign(topbar.style, {
+  // Brand row — hex sigil + wordmark (static chrome).
+  const brandRow = el("div", "fw-hub-brand");
+  Object.assign(brandRow.style, {
     display: "flex",
     alignItems: "center",
-    justifyContent: "space-between",
-    height: "64px",
-    padding: "0 var(--space-lg)",
-    borderBottom: "1px solid var(--line-faint)",
-    background: "var(--bg-deep)",
+    gap: "10px",
+    padding: "0 22px 22px",
+    borderBottom: "1px solid rgba(95,200,245,0.1)",
   } satisfies Partial<CSSStyleDeclaration>);
+  brandRow.innerHTML =
+    `<span style="width:26px;height:26px;clip-path:polygon(25% 0,75% 0,100% 50%,` +
+    `75% 100%,25% 100%,0 50%);background:linear-gradient(135deg,var(--glow),` +
+    `#0891b2)"></span>` +
+    `<span style="font-family:${FONT.display};font-weight:800;font-size:15px;` +
+    `letter-spacing:0.06em;color:var(--text)">FIREWALL` +
+    `<span style="color:var(--accent)">OPS</span></span>`;
 
-  const brand = el("div", "fw-brand");
-  Object.assign(brand.style, {
-    fontFamily: "var(--font-display)",
-    fontWeight: "800",
-    fontSize: "17px",
-    letterSpacing: "0.08em",
-    color: "var(--text)",
-  } satisfies Partial<CSSStyleDeclaration>);
-  brand.innerHTML = `FIREWALL<span style="color:var(--accent)">OPS</span>`;
-
-  const profileBlock = el("div", "fw-profile");
-  Object.assign(profileBlock.style, {
+  // ── PROFILE CLUSTER (chamfered, bracket-hex avatar) ───────────────────────
+  // REAL: callsign + W/L from fetchProfile. ILLUSTRATIVE: rank tier + XP bar.
+  const profileCard = el("div", "fw-hub-profile");
+  Object.assign(profileCard.style, {
+    position: "relative",
+    margin: "18px 14px",
+    padding: "16px 16px 18px",
+    background: "linear-gradient(180deg,rgba(18,29,49,0.6),rgba(11,18,32,0.5))",
+    border: "1px solid rgba(95,200,245,0.16)",
+    clipPath: chamfer(12),
     display: "flex",
+    flexDirection: "column",
+    gap: "14px",
+  } satisfies Partial<CSSStyleDeclaration>);
+  // Left edge-bar (parent is position:relative).
+  profileCard.insertAdjacentHTML("afterbegin", edgeBar(3, 10));
+
+  const profileTop = el("div", "fw-hub-profile-top");
+  Object.assign(profileTop.style, {
+    display: "flex",
+    gap: "14px",
     alignItems: "center",
-    gap: "var(--space-lg)",
   } satisfies Partial<CSSStyleDeclaration>);
 
-  // Profile = display name + W/L only (scope-trim: no XP/rank/credits).
-  const profileText = el("div", "fw-profile-text");
+  // Bracket-hex avatar (violet hex frame + corner bracket) — static chrome.
+  const avatar = document.createElement("div");
+  Object.assign(avatar.style, {
+    position: "relative",
+    width: "52px",
+    height: "52px",
+    flex: "none",
+  } satisfies Partial<CSSStyleDeclaration>);
+  avatar.innerHTML =
+    `<div style="width:100%;height:100%;clip-path:polygon(25% 0,75% 0,100% 50%,` +
+    `75% 100%,25% 100%,0 50%);background:linear-gradient(135deg,var(--violet),` +
+    `#6d28d9)"></div>` +
+    `<div style="position:absolute;top:-2px;right:-2px;width:10px;height:10px;` +
+    `border-top:2px solid var(--glow);border-right:2px solid var(--glow)"></div>`;
+
+  const profileText = el("div", "fw-hub-profile-text");
   Object.assign(profileText.style, {
-    textAlign: "right",
-    lineHeight: "1.3",
+    minWidth: "0",
+    flex: "1",
   } satisfies Partial<CSSStyleDeclaration>);
+
+  // REAL display name (UI-04 partial). textContent only — never innerHTML.
   const handleEl = el("div", "fw-profile-handle");
   Object.assign(handleEl.style, {
     fontFamily: "var(--font-display)",
     fontWeight: "700",
-    fontSize: "13px",
-    letterSpacing: "0.06em",
+    fontSize: "15px",
+    letterSpacing: "0.04em",
     color: "var(--text)",
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap",
   } satisfies Partial<CSSStyleDeclaration>);
   handleEl.textContent = "—";
+
+  // ILLUSTRATIVE: rank tier (no backend) — labelled SYS chrome.
+  const rankEl = el("div", "fw-hub-rank");
+  Object.assign(rankEl.style, {
+    display: "flex",
+    alignItems: "center",
+    gap: "6px",
+    marginTop: "4px",
+    fontSize: "10px",
+    letterSpacing: "0.08em",
+    color: "var(--violet-2)",
+  } satisfies Partial<CSSStyleDeclaration>);
+  rankEl.textContent = "◆ DIAMOND III"; // ILLUSTRATIVE rank tier (no backend)
+  rankEl.title = "Illustrative — rank tiers are not yet wired to a backend.";
+
+  // REAL W/L line (UI-04 partial). textContent only.
   const wlEl = el("div", "fw-profile-wl");
   Object.assign(wlEl.style, {
     fontFamily: "var(--font-mono)",
     fontSize: "11px",
     color: "var(--muted)",
+    marginTop: "5px",
   } satisfies Partial<CSSStyleDeclaration>);
   wlEl.textContent = "W 0 · L 0";
-  profileText.append(handleEl, wlEl);
 
+  profileText.append(handleEl, rankEl, wlEl);
+  profileTop.append(avatar, profileText);
+
+  // ILLUSTRATIVE XP / level band — sourceless numerics behind a SYS frame.
+  const xpBand = el("div", "fw-hub-xp");
+  xpBand.innerHTML =
+    `<div style="display:flex;justify-content:space-between;font-size:10px;` +
+    `color:var(--faint);margin-bottom:5px"><span>SYS · LVL —</span>` +
+    `<span style="font-family:${FONT.mono};color:var(--text-2)">— / — XP</span></div>` +
+    `<div style="height:5px;background:#16233c;overflow:hidden;clip-path:` +
+    `polygon(2px 0,100% 0,calc(100% - 2px) 100%,0 100%)"><div style="width:68%;` +
+    `height:100%;background:linear-gradient(90deg,var(--accent),var(--violet));` +
+    `opacity:0.55"></div></div>` +
+    `<div style="font-family:${FONT.mono};font-size:8px;letter-spacing:0.16em;` +
+    `color:var(--faint);margin-top:5px">// ILLUSTRATIVE — NO XP BACKEND</div>`;
+
+  profileCard.append(profileTop, xpBand);
+
+  // ── NAV (active = angled edge-bar; PLAY active) ───────────────────────────
+  // The ROOM BROWSER nav item scrolls the live room list into view; the rest are
+  // display-only scaffolding for the not-yet-built surfaces.
+  const nav = el("nav", "fw-hub-nav");
+  Object.assign(nav.style, {
+    padding: "10px 14px",
+    display: "flex",
+    flexDirection: "column",
+    gap: "5px",
+    flex: "1",
+  } satisfies Partial<CSSStyleDeclaration>);
+
+  // Active PLAY item (angled edge-bar) — focuses the QUICK MATCH hero.
+  const playNav = el("button", "fw-hub-nav-item");
+  playNav.type = "button";
+  Object.assign(playNav.style, {
+    position: "relative",
+    display: "flex",
+    alignItems: "center",
+    gap: "12px",
+    padding: "11px 14px",
+    background: "rgba(34,211,238,0.12)",
+    clipPath: "polygon(0 0,100% 0,100% 100%,8px 100%,0 calc(100% - 8px))",
+    color: "var(--glow)",
+    fontFamily: "var(--font-display)",
+    fontWeight: "600",
+    fontSize: "12px",
+    letterSpacing: "0.06em",
+    border: "none",
+    textAlign: "left",
+    cursor: "pointer",
+  } satisfies Partial<CSSStyleDeclaration>);
+  playNav.innerHTML =
+    `<span style="position:absolute;left:0;top:4px;bottom:4px;width:3px;` +
+    `background:linear-gradient(180deg,var(--glow),var(--edge));box-shadow:` +
+    `0 0 10px var(--edge)"></span><span style="font-size:14px">◈</span> PLAY`;
+  nav.appendChild(playNav);
+
+  // Display-only nav scaffolding (ROOM BROWSER scrolls to the live list).
+  for (const item of [
+    { glyph: "◇", label: "ROSTER / GARAGE", id: "" },
+    { glyph: "▤", label: "ROOM BROWSER", id: "browser" },
+    { glyph: "◭", label: "STORE", id: "" },
+    { glyph: "⊡", label: "CAREER", id: "" },
+  ]) {
+    const n = el("button", "fw-hub-nav-item");
+    n.type = "button";
+    Object.assign(n.style, {
+      display: "flex",
+      alignItems: "center",
+      gap: "12px",
+      padding: "11px 14px",
+      background: "transparent",
+      color: "var(--text-2)",
+      fontFamily: "var(--font-display)",
+      fontWeight: "500",
+      fontSize: "12px",
+      letterSpacing: "0.06em",
+      border: "none",
+      textAlign: "left",
+      cursor: item.id === "browser" ? "pointer" : "default",
+    } satisfies Partial<CSSStyleDeclaration>);
+    // glyph + label via textContent-safe nodes (static literals, but kept tidy).
+    const g = document.createElement("span");
+    g.style.fontSize = "14px";
+    g.textContent = item.glyph;
+    n.append(g, document.createTextNode(" " + item.label));
+    if (item.id === "browser") {
+      n.addEventListener("click", () =>
+        listSection.scrollIntoView({ behavior: "smooth", block: "start" }),
+      );
+    }
+    nav.appendChild(n);
+  }
+
+  // ── settings / log-out footer (Clerk UserButton lives here) ───────────────
+  const sidebarFoot = el("div", "fw-hub-foot");
+  Object.assign(sidebarFoot.style, {
+    padding: "14px 18px",
+    borderTop: "1px solid rgba(95,200,245,0.1)",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    fontFamily: "var(--font-display)",
+    fontSize: "11px",
+    letterSpacing: "0.06em",
+    color: "var(--muted)",
+  } satisfies Partial<CSSStyleDeclaration>);
+  const settingsLbl = document.createElement("span");
+  settingsLbl.textContent = "SETTINGS";
   // Clerk UserButton mount target — provides LOG OUT (AUTH-02).
   const userButtonMount = document.createElement("div");
   userButtonMount.className = "fw-userbutton";
+  sidebarFoot.append(settingsLbl, userButtonMount);
 
-  profileBlock.append(profileText, userButtonMount);
-  topbar.append(brand, profileBlock);
+  sidebar.append(brandRow, profileCard, nav, sidebarFoot);
 
-  // ── body: center create/hero + room browser ──────────────────────────────
-  const body = el("main", "fw-lobby-body");
-  Object.assign(body.style, {
+  // ════════════════════════════════════════════════════════════════════════
+  //  CENTER — top bar · QUICK MATCH hero + mode cards · ROOM BROWSER · INTEL
+  // ════════════════════════════════════════════════════════════════════════
+  const center = el("main", "fw-hub-center");
+  Object.assign(center.style, {
     flex: "1",
+    minWidth: "0",
     display: "flex",
     flexDirection: "column",
-    gap: "var(--space-lg)",
-    padding: "var(--space-xl) var(--space-lg)",
-    maxWidth: "880px",
-    width: "100%",
-    margin: "0 auto",
+    overflowY: "auto",
   } satisfies Partial<CSSStyleDeclaration>);
 
-  // Header row: section title + CREATE ROOM action.
+  // ── top bar: COMMAND CENTER label · CR/KEYS (illustrative "—") · gear ──────
+  const topbar = el("header", "fw-hub-topbar");
+  Object.assign(topbar.style, {
+    height: "60px",
+    flex: "none",
+    borderBottom: "1px solid rgba(95,200,245,0.12)",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    padding: "0 28px",
+    background: "var(--bg-deep)",
+  } satisfies Partial<CSSStyleDeclaration>);
+  topbar.innerHTML =
+    `<div style="display:flex;align-items:center;gap:12px">` +
+    `<span style="font-family:${FONT.display};font-size:12px;letter-spacing:0.12em;` +
+    `color:var(--text-2)">COMMAND CENTER</span>` +
+    `<span style="font-family:${FONT.display};color:var(--glow);font-size:11px">//</span></div>` +
+    // CR / KEYS currency — NO backend → muted "—" (never an invented number).
+    `<div style="display:flex;align-items:center;gap:20px">` +
+    `<div style="display:flex;align-items:center;gap:8px" title="Illustrative — currency is not yet wired to a backend.">` +
+    `<span style="color:var(--accent);font-size:13px">◈</span>` +
+    `<span style="font-family:${FONT.mono};color:var(--text);font-size:14px">—</span>` +
+    `<span style="font-size:10px;color:var(--faint)">CR</span></div>` +
+    `<div style="display:flex;align-items:center;gap:8px" title="Illustrative — currency is not yet wired to a backend.">` +
+    `<span style="color:var(--violet-2);font-size:13px">◆</span>` +
+    `<span style="font-family:${FONT.mono};color:var(--text);font-size:14px">—</span>` +
+    `<span style="font-size:10px;color:var(--faint)">KEYS</span></div>` +
+    `<div style="width:1px;height:22px;background:rgba(95,200,245,0.15)"></div>` +
+    `<div style="width:32px;height:32px;border:1px solid rgba(95,200,245,0.2);` +
+    `clip-path:polygon(0 7px,7px 0,100% 0,100% calc(100% - 7px),calc(100% - 7px) 100%,0 100%);` +
+    `display:flex;align-items:center;justify-content:center;color:var(--text-2);font-size:14px">⚙</div></div>`;
+
+  // ── center scroll body ────────────────────────────────────────────────────
+  const centerBody = el("div", "fw-hub-body");
+  Object.assign(centerBody.style, {
+    flex: "1",
+    padding: "24px 28px",
+    display: "flex",
+    flexDirection: "column",
+    gap: "20px",
+  } satisfies Partial<CSSStyleDeclaration>);
+
+  // ── QUICK MATCH hero (chamfered + edge-bar + mesh grid + glow) ─────────────
+  // The DEPLOY ▸ CTA routes through the EXISTING create flow (openCreateForm).
+  const hero = el("section", "fw-hub-hero");
+  Object.assign(hero.style, {
+    position: "relative",
+    overflow: "hidden",
+    border: "1px solid rgba(95,200,245,0.28)",
+    clipPath: chamfer(16),
+    background: "linear-gradient(120deg,#16233c 0%,#0d1830 60%,#1a1430 100%)",
+    display: "flex",
+    flexWrap: "wrap",
+  } satisfies Partial<CSSStyleDeclaration>);
+  // Decorative mesh grid + glow + hero edge-bar (static chrome).
+  hero.insertAdjacentHTML(
+    "afterbegin",
+    `<div style="position:absolute;inset:0;background-image:` +
+      `linear-gradient(rgba(34,211,238,0.05) 1px,transparent 1px),` +
+      `linear-gradient(90deg,rgba(34,211,238,0.05) 1px,transparent 1px);` +
+      `background-size:36px 36px;pointer-events:none"></div>` +
+      `<div style="position:absolute;top:-120px;right:80px;width:420px;height:420px;` +
+      `background:radial-gradient(circle,rgba(34,211,238,0.18),transparent 60%);` +
+      `pointer-events:none"></div>` +
+      `<div style="position:absolute;left:0;top:14px;bottom:14px;width:4px;` +
+      `background:linear-gradient(180deg,var(--glow),var(--edge));` +
+      `box-shadow:0 0 14px var(--edge);pointer-events:none"></div>`,
+  );
+
+  // Hero copy column.
+  const heroCopy = el("div", "fw-hub-hero-copy");
+  Object.assign(heroCopy.style, {
+    position: "relative",
+    padding: "32px 34px",
+    display: "flex",
+    flexDirection: "column",
+    justifyContent: "space-between",
+    gap: "20px",
+    flex: "1 1 360px",
+    minWidth: "0",
+  } satisfies Partial<CSSStyleDeclaration>);
+  heroCopy.innerHTML =
+    `<div><div style="font-family:${FONT.mono};font-size:11px;letter-spacing:0.16em;` +
+    `color:var(--glow);margin-bottom:12px">▸ READY TO DEPLOY</div>` +
+    `<div style="font-family:${FONT.display};font-weight:900;font-size:clamp(30px,4vw,40px);` +
+    `line-height:1;color:var(--text)">QUICK<br>MATCH</div>` +
+    `<div style="font-size:13px;color:var(--text-2);margin-top:14px;line-height:1.6">` +
+    `Spin up a room and breach. Modes 1v1 to 4v4.</div></div>`;
+
+  // Hero CTA row — DEPLOY ▸ (live: openCreateForm) + RANKED (illustrative).
+  const heroCtas = el("div", "fw-hub-hero-ctas");
+  Object.assign(heroCtas.style, {
+    display: "flex",
+    gap: "12px",
+    alignItems: "center",
+    flexWrap: "wrap",
+  } satisfies Partial<CSSStyleDeclaration>);
+
+  const deployBtn = el("button", "fw-btn-primary");
+  deployBtn.type = "button";
+  deployBtn.textContent = "DEPLOY ▸";
+  Object.assign(deployBtn.style, {
+    padding: "14px 38px",
+    background: "linear-gradient(180deg,var(--glow),var(--accent))",
+    color: "var(--bg-deeper)",
+    fontFamily: "var(--font-display)",
+    fontWeight: "800",
+    fontSize: "15px",
+    letterSpacing: "0.08em",
+    border: "none",
+    borderRadius: "0",
+    clipPath: chamfer(10),
+    boxShadow: "0 0 30px -6px rgba(34,211,238,0.6)",
+    cursor: "pointer",
+  } satisfies Partial<CSSStyleDeclaration>);
+  // LIVE: routes through the existing create flow (no new join path invented).
+  deployBtn.addEventListener("click", () => openCreateForm());
+
+  const rankedBtn = el("button", "fw-hub-ranked");
+  rankedBtn.type = "button";
+  rankedBtn.textContent = "RANKED";
+  rankedBtn.title = "Illustrative — ranked queue is not yet wired.";
+  Object.assign(rankedBtn.style, {
+    padding: "14px 22px",
+    background: "transparent",
+    border: "1px solid rgba(95,200,245,0.25)",
+    color: "var(--text)",
+    fontFamily: "var(--font-display)",
+    fontWeight: "600",
+    fontSize: "12px",
+    letterSpacing: "0.06em",
+    clipPath: chamfer(9),
+    cursor: "default",
+  } satisfies Partial<CSSStyleDeclaration>);
+
+  heroCtas.append(deployBtn, rankedBtn);
+  heroCopy.appendChild(heroCtas);
+
+  // Mode cards — RANKED / CUSTOM / TRAINING. CUSTOM is LIVE (openCreateForm);
+  // the other two are illustrative scaffolding.
+  const modeCards = el("div", "fw-hub-modecards");
+  Object.assign(modeCards.style, {
+    position: "relative",
+    flex: "1 1 320px",
+    display: "flex",
+    gap: "12px",
+    alignItems: "center",
+    padding: "24px 28px 24px 0",
+    flexWrap: "wrap",
+  } satisfies Partial<CSSStyleDeclaration>);
+  modeCards.appendChild(
+    modeCard("⚔", "var(--accent)", "RANKED", "Climb the ladder", "Illustrative — ranked is not yet wired.", null),
+  );
+  modeCards.appendChild(
+    // CUSTOM is the LIVE create-a-room path.
+    modeCard("⬢", "var(--violet-2)", "CUSTOM", "Build a room", null, () => openCreateForm()),
+  );
+  modeCards.appendChild(
+    modeCard("◎", "var(--warn)", "TRAINING", "Solo range", "Illustrative — training range is not yet wired.", null),
+  );
+
+  hero.append(heroCopy, modeCards);
+
+  // ── ROOM BROWSER (LIVE — reuses renderRooms/renderRoomRow/renderEmptyState) ─
+  const listSection = el("section", "fw-hub-browser");
+  Object.assign(listSection.style, {
+    display: "flex",
+    flexDirection: "column",
+    gap: "12px",
+  } satisfies Partial<CSSStyleDeclaration>);
+
   const listHeader = el("div", "fw-list-header");
   Object.assign(listHeader.style, {
     display: "flex",
     alignItems: "center",
-    justifyContent: "space-between",
+    gap: "12px",
   } satisfies Partial<CSSStyleDeclaration>);
-
   const listTitle = el("h2", "fw-list-title");
   Object.assign(listTitle.style, {
     fontFamily: "var(--font-display)",
-    fontWeight: "700",
-    fontSize: "18px",
-    letterSpacing: "0.06em",
-    color: "var(--text)",
+    fontSize: "11px",
+    letterSpacing: "0.14em",
+    color: "var(--text-2)",
+    margin: "0",
   } satisfies Partial<CSSStyleDeclaration>);
-  listTitle.textContent = "OPEN ROOMS";
-
-  const createBtn = el("button", "fw-btn-primary");
+  listTitle.textContent = "ROOM BROWSER — OPEN ROOMS";
+  // Dashed rail divider (static chrome).
+  const railSpacer = document.createElement("div");
+  Object.assign(railSpacer.style, {
+    flex: "1",
+    height: "1px",
+    background:
+      "repeating-linear-gradient(90deg, rgba(95,200,245,0.4) 0 6px, transparent 6px 12px)",
+  } satisfies Partial<CSSStyleDeclaration>);
+  const createBtn = el("button", "fw-hub-create");
   createBtn.type = "button";
-  createBtn.textContent = "CREATE ROOM"; // exact copy (UI-SPEC).
+  createBtn.textContent = "CREATE ROOM"; // exact copy.
+  Object.assign(createBtn.style, {
+    padding: "9px 18px",
+    background: "transparent",
+    color: "var(--accent)",
+    fontFamily: "var(--font-display)",
+    fontWeight: "700",
+    fontSize: "11px",
+    letterSpacing: "0.08em",
+    border: "1px solid var(--accent)",
+    clipPath: angledTab(9),
+    cursor: "pointer",
+  } satisfies Partial<CSSStyleDeclaration>);
   createBtn.addEventListener("click", () => openCreateForm());
+  listHeader.append(listTitle, railSpacer, createBtn);
 
-  listHeader.append(listTitle, createBtn);
-
-  // The live room list container.
   const listEl = el("div", "fw-room-list");
   Object.assign(listEl.style, {
     display: "flex",
     flexDirection: "column",
     gap: "var(--space-sm)",
   } satisfies Partial<CSSStyleDeclaration>);
+  listSection.append(listHeader, listEl);
 
-  body.append(listHeader, listEl);
-  page.append(topbar, body);
+  // ── INTEL FEED (illustrative news + events — labelled SYS chrome) ──────────
+  const intel = renderIntelFeed();
+
+  centerBody.append(hero, listSection, intel);
+  center.append(topbar, centerBody);
+
+  // ════════════════════════════════════════════════════════════════════════
+  //  RIGHT — SQUAD panel (illustrative friends list — labelled SYS chrome)
+  // ════════════════════════════════════════════════════════════════════════
+  const squad = renderSquadPanel();
+
+  page.append(sidebar, center, squad);
   root.appendChild(page);
 
   // Mount the Clerk user button (LOG OUT).
   mountUserButton(userButtonMount);
 
-  // ── room-list rendering ───────────────────────────────────────────────────
+  // ── room-list rendering (LIVE — unchanged behavior) ───────────────────────
   function renderRooms(rooms: LobbyRoomEntry[]): void {
     listEl.innerHTML = "";
 
@@ -263,24 +646,30 @@ export function renderLobby(
 
     const row = el("div", "fw-room-row");
     Object.assign(row.style, {
+      position: "relative",
       display: "flex",
       alignItems: "center",
       gap: "var(--space-md)",
-      padding: "14px var(--space-md)",
+      padding: "13px 16px",
       background: "var(--surface)",
-      border: "1px solid var(--line-faint)",
-      borderRadius: "var(--radius-5)",
+      border: "1px solid rgba(95,200,245,0.14)",
+      clipPath: chamfer(10),
     } satisfies Partial<CSSStyleDeclaration>);
 
     const nameEl = el("div", "fw-room-name");
     Object.assign(nameEl.style, {
       flex: "1",
+      minWidth: "0",
       fontFamily: "var(--font-display)",
       fontWeight: "700",
       fontSize: "13px",
       letterSpacing: "0.04em",
       color: "var(--text)",
+      overflow: "hidden",
+      textOverflow: "ellipsis",
+      whiteSpace: "nowrap",
     } satisfies Partial<CSSStyleDeclaration>);
+    // textContent — never innerHTML with room data (XSS guard).
     nameEl.textContent = name;
 
     const modeEl = el("div", "fw-room-mode fw-label");
@@ -312,7 +701,7 @@ export function renderLobby(
       fontSize: "12px",
       letterSpacing: "0.08em",
       border: `1px solid ${locked ? "var(--line)" : "var(--accent)"}`,
-      borderRadius: "var(--radius-3)",
+      clipPath: angledTab(9),
       cursor: locked ? "not-allowed" : "pointer",
     } satisfies Partial<CSSStyleDeclaration>);
     joinBtn.disabled = locked;
@@ -529,7 +918,7 @@ export function renderLobby(
     input.focus();
   }
 
-  // ── profile read + handle gate ─────────────────────────────────────────────
+  // ── profile read + handle gate (LIVE — unchanged data path) ────────────────
   async function loadProfile(): Promise<void> {
     try {
       const profile = await fetchProfile();
@@ -582,6 +971,261 @@ export function renderLobby(
 
 // ── shared primitives ────────────────────────────────────────────────────────
 
+/**
+ * A center mode card (chamfered tile). When `onClick` is supplied the card is a
+ * LIVE action (e.g. CUSTOM → create a room); when `illTitle` is supplied instead
+ * the card is STATIC ILLUSTRATIVE scaffolding (hover title explains).
+ */
+function modeCard(
+  glyph: string,
+  glyphColor: string,
+  title: string,
+  blurb: string,
+  illTitle: string | null,
+  onClick: (() => void) | null,
+): HTMLElement {
+  const card = document.createElement(onClick ? "button" : "div");
+  Object.assign(card.style, {
+    flex: "1 1 120px",
+    minWidth: "120px",
+    height: "180px",
+    background: "rgba(11,18,32,0.7)",
+    border: "1px solid rgba(95,200,245,0.14)",
+    clipPath: chamfer(10),
+    padding: "18px",
+    display: "flex",
+    flexDirection: "column",
+    justifyContent: "space-between",
+    textAlign: "left",
+    cursor: onClick ? "pointer" : "default",
+  } satisfies Partial<CSSStyleDeclaration>);
+  if (onClick) {
+    (card as HTMLButtonElement).type = "button";
+    card.addEventListener("click", onClick);
+  } else if (illTitle) {
+    card.title = illTitle;
+  }
+
+  const g = document.createElement("span");
+  Object.assign(g.style, { fontSize: "22px", color: glyphColor } satisfies Partial<CSSStyleDeclaration>);
+  g.textContent = glyph;
+
+  const meta = document.createElement("div");
+  const t = document.createElement("div");
+  Object.assign(t.style, {
+    fontFamily: "var(--font-display)",
+    fontWeight: "700",
+    fontSize: "13px",
+    color: "var(--text)",
+  } satisfies Partial<CSSStyleDeclaration>);
+  t.textContent = title;
+  const b = document.createElement("div");
+  Object.assign(b.style, {
+    fontSize: "10px",
+    color: "var(--faint)",
+    marginTop: "4px",
+  } satisfies Partial<CSSStyleDeclaration>);
+  b.textContent = onClick ? blurb : `${blurb} · SYS`;
+  meta.append(t, b);
+
+  card.append(g, meta);
+  return card;
+}
+
+/**
+ * The INTEL FEED region — STATIC ILLUSTRATIVE news + events (no backend). The
+ * sample content mirrors the Meshed mockup but is explicitly marked illustrative
+ * (a SYS lead-in + a `// ILLUSTRATIVE` note), and surfaces the locked empty-state
+ * copy so a future data wire-up has a home. Static markup only (no caller input).
+ */
+function renderIntelFeed(): HTMLElement {
+  const wrap = el("section", "fw-hub-intel");
+  Object.assign(wrap.style, {
+    display: "flex",
+    flexDirection: "column",
+    gap: "12px",
+  } satisfies Partial<CSSStyleDeclaration>);
+
+  const header = document.createElement("div");
+  Object.assign(header.style, {
+    display: "flex",
+    alignItems: "center",
+    gap: "12px",
+  } satisfies Partial<CSSStyleDeclaration>);
+  header.innerHTML =
+    `<span style="font-family:${FONT.display};font-size:11px;letter-spacing:0.14em;` +
+    `color:var(--text-2)">INTEL FEED — NEWS &amp; EVENTS</span>` +
+    `<div style="flex:1;height:1px;background:repeating-linear-gradient(90deg,` +
+    `rgba(95,200,245,0.4) 0 6px,transparent 6px 12px)"></div>` +
+    `<span style="font-family:${FONT.mono};font-size:8px;letter-spacing:0.16em;` +
+    `color:var(--faint)">// ILLUSTRATIVE · NO INTEL YET</span>`;
+
+  const grid = document.createElement("div");
+  Object.assign(grid.style, {
+    display: "grid",
+    gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 260px), 1fr))",
+    gap: "14px",
+  } satisfies Partial<CSSStyleDeclaration>);
+
+  // Featured (violet) — SYS season card.
+  const featured = document.createElement("div");
+  Object.assign(featured.style, {
+    position: "relative",
+    overflow: "hidden",
+    minHeight: "150px",
+    gridColumn: "span 1",
+    border: "1px solid rgba(168,85,247,0.32)",
+    clipPath: chamfer(12),
+    background: "linear-gradient(135deg,#1a1438,#0d1326)",
+  } satisfies Partial<CSSStyleDeclaration>);
+  featured.title = "Illustrative — the intel feed is not yet wired to a backend.";
+  featured.innerHTML =
+    `<div style="position:absolute;inset:0;background-image:linear-gradient(` +
+    `rgba(168,85,247,0.06) 1px,transparent 1px);background-size:30px 30px"></div>` +
+    `<div style="position:absolute;left:0;top:12px;bottom:12px;width:3px;` +
+    `background:linear-gradient(180deg,var(--violet-2),#7c3aed);box-shadow:0 0 12px #7c3aed"></div>` +
+    `<div style="position:relative;padding:22px 24px;height:100%;display:flex;` +
+    `flex-direction:column;justify-content:flex-end">` +
+    `<span style="align-self:flex-start;font-family:${FONT.mono};font-size:9px;` +
+    `letter-spacing:0.14em;color:var(--violet-2);border:1px solid rgba(168,85,247,0.4);` +
+    `padding:3px 8px;margin-bottom:10px">SYS · SAMPLE</span>` +
+    `<div style="font-family:${FONT.display};font-weight:800;font-size:18px;` +
+    `color:var(--text)">ZERO-DAY PROTOCOL</div>` +
+    `<div style="font-size:12px;color:#cfe9f8;margin-top:6px">Illustrative season ` +
+    `splash — live news lands when the intel feed is wired.</div></div>`;
+
+  // Two event cards — SYS event/patch (illustrative).
+  const sideCol = document.createElement("div");
+  Object.assign(sideCol.style, {
+    display: "flex",
+    flexDirection: "column",
+    gap: "10px",
+  } satisfies Partial<CSSStyleDeclaration>);
+  sideCol.innerHTML =
+    eventCard("var(--glow)", "var(--edge)", "SYS · EVENT", "Packet Storm Weekend", "Illustrative event slot") +
+    eventCard("#fbbf24", "var(--warn)", "SYS · PATCH", "Trojan rebalance", "Illustrative patch slot");
+
+  grid.append(featured, sideCol);
+  wrap.append(header, grid);
+  return wrap;
+}
+
+/** A single illustrative INTEL event card (static markup only). */
+function eventCard(
+  top: string,
+  bottom: string,
+  tag: string,
+  title: string,
+  blurb: string,
+): string {
+  return (
+    `<div style="flex:1;position:relative;background:var(--panel,#111c30);` +
+    `border:1px solid rgba(95,200,245,0.14);clip-path:${chamfer(10)};` +
+    `padding:14px 16px;display:flex;flex-direction:column;justify-content:center" ` +
+    `title="Illustrative — events are not yet wired to a backend.">` +
+    `<div style="position:absolute;left:0;top:8px;bottom:8px;width:3px;` +
+    `background:linear-gradient(180deg,${top},${bottom})"></div>` +
+    `<span style="font-family:${FONT.mono};font-size:9px;letter-spacing:0.12em;` +
+    `color:${top}">${tag}</span>` +
+    `<div style="font-family:${FONT.display};font-weight:700;font-size:13px;` +
+    `color:var(--text);margin-top:5px">${title}</div>` +
+    `<div style="font-size:10px;color:var(--faint);margin-top:3px">${blurb}</div></div>`
+  );
+}
+
+/**
+ * The right SQUAD panel — STATIC ILLUSTRATIVE friends list (no backend). It shows
+ * the locked empty-state copy (`NO AGENTS ONLINE` + a display-only `+ ADD AGENT`)
+ * AND a clearly-labelled SYS sample roster so the founder's chosen illustrative
+ * chrome reads as "what this will look like," never as live telemetry. Static
+ * markup only (no caller input).
+ */
+function renderSquadPanel(): HTMLElement {
+  const panel = el("aside", "fw-hub-squad");
+  Object.assign(panel.style, {
+    width: "262px",
+    flex: "none",
+    background: "linear-gradient(180deg,#0d1626,#0a1220)",
+    borderLeft: "1px solid rgba(95,200,245,0.14)",
+    display: "flex",
+    flexDirection: "column",
+  } satisfies Partial<CSSStyleDeclaration>);
+
+  const head = document.createElement("div");
+  Object.assign(head.style, {
+    padding: "20px 20px 14px",
+    display: "flex",
+    justifyContent: "space-between",
+    alignItems: "center",
+    borderBottom: "1px solid rgba(95,200,245,0.1)",
+  } satisfies Partial<CSSStyleDeclaration>);
+  head.innerHTML =
+    `<span style="font-family:${FONT.display};font-weight:700;font-size:13px;` +
+    `color:var(--text);letter-spacing:0.06em">SQUAD</span>` +
+    // No backend → muted "—" online count (never an invented number).
+    `<span style="font-family:${FONT.mono};font-size:10px;color:var(--faint)">— ONLINE</span>`;
+
+  const body = document.createElement("div");
+  Object.assign(body.style, {
+    padding: "14px",
+    display: "flex",
+    flexDirection: "column",
+    gap: "6px",
+    flex: "1",
+    overflow: "hidden",
+  } satisfies Partial<CSSStyleDeclaration>);
+  body.title = "Illustrative — the squad list is not yet wired to a backend.";
+  body.innerHTML =
+    `<div style="font-family:${FONT.mono};font-size:9px;letter-spacing:0.14em;` +
+    `color:var(--faint);padding:4px 6px">// ILLUSTRATIVE · NO AGENTS ONLINE</div>` +
+    squadRow("var(--accent)", "GH0ST_BYTE", "▸ Ranked · breaching", true) +
+    squadRow("var(--ready)", "R00T_KIT", "In lobby", false) +
+    squadRow("var(--warn)", "CIPH3R", "Away", false);
+
+  const foot = document.createElement("div");
+  Object.assign(foot.style, {
+    padding: "14px",
+    borderTop: "1px solid rgba(95,200,245,0.1)",
+  } satisfies Partial<CSSStyleDeclaration>);
+  // Display-only `+ ADD AGENT` (locked empty-state copy; no wiring).
+  foot.innerHTML =
+    `<div style="padding:11px;text-align:center;border:1px dashed rgba(95,200,245,0.25);` +
+    `clip-path:${chamfer(8)};font-family:${FONT.display};font-size:11px;` +
+    `letter-spacing:0.06em;color:var(--text-2)" title="Illustrative — adding agents is not yet wired.">` +
+    `+ ADD AGENT</div>`;
+
+  panel.append(head, body, foot);
+  return panel;
+}
+
+/** A single illustrative SQUAD roster row (static markup only). */
+function squadRow(
+  dot: string,
+  name: string,
+  status: string,
+  active: boolean,
+): string {
+  const wrap = active
+    ? `position:relative;background:rgba(34,211,238,0.08);clip-path:polygon(0 0,100% 0,100% 100%,7px 100%,0 calc(100% - 7px));`
+    : "";
+  const bar = active
+    ? `<div style="position:absolute;left:0;top:4px;bottom:4px;width:2px;background:var(--glow)"></div>`
+    : "";
+  const statusColor = active ? "var(--glow)" : "var(--faint)";
+  return (
+    `<div style="${wrap}display:flex;align-items:center;gap:11px;padding:9px 10px">` +
+    `${bar}` +
+    `<div style="position:relative"><div style="width:34px;height:34px;` +
+    `clip-path:polygon(25% 0,75% 0,100% 50%,75% 100%,25% 100%,0 50%);` +
+    `background:linear-gradient(135deg,#334155,#1e293b)"></div>` +
+    `<span style="position:absolute;bottom:-1px;right:-1px;width:9px;height:9px;` +
+    `background:${dot};border-radius:50%;border:2px solid #0d1626"></span></div>` +
+    `<div style="flex:1;min-width:0"><div style="font-size:12px;color:var(--text);` +
+    `overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${name}</div>` +
+    `<div style="font-family:${FONT.mono};font-size:9px;color:${statusColor}">${status}</div></div></div>`
+  );
+}
+
 /** The empty-state card (NO OPEN ROOMS / Be the first to deploy.). */
 function renderEmptyState(onCreate: () => void): HTMLElement {
   const wrap = document.createElement("div");
@@ -594,7 +1238,7 @@ function renderEmptyState(onCreate: () => void): HTMLElement {
     padding: "var(--space-3xl) var(--space-lg)",
     background: "var(--surface)",
     border: "1px dashed var(--line)",
-    borderRadius: "var(--radius-5)",
+    clipPath: chamfer(12),
     textAlign: "center",
   } satisfies Partial<CSSStyleDeclaration>);
 
@@ -642,15 +1286,15 @@ function modalOverlay(): HTMLDivElement {
   return overlay;
 }
 
-/** A centered modal card on the field. */
+/** A centered modal card on the field (chamfered Meshed frame). */
 function modalCard(): HTMLDivElement {
   const card = document.createElement("div");
   Object.assign(card.style, {
     width: "420px",
     maxWidth: "100%",
     background: "var(--surface)",
-    border: "1px solid var(--line)",
-    borderRadius: "var(--radius-6)",
+    border: "1px solid rgba(95,200,245,0.22)",
+    clipPath: chamfer(12),
     padding: "var(--space-lg)",
   } satisfies Partial<CSSStyleDeclaration>);
   return card;

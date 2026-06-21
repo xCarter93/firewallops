@@ -153,4 +153,37 @@ describe("shell smoke", () => {
     // match is matchSession's job only on a real quit / RETURN TO LOBBY.
     expect(leaveCurrent).not.toHaveBeenCalled();
   });
+
+  // ── UI-04 partial (Meshed Home Hub): the restyled lobby surfaces the player's
+  // REAL profile display name + W/L from the stubbed `/internal/profile` fetch.
+  // This is the Nyquist anchor proving the Meshed restyle did not sever the
+  // profile data path (handleEl/wlEl ← fetchProfile → loadProfile).
+  it("Home Hub surfaces the profile display name + W/L from the stubbed fetch (UI-04 partial)", async () => {
+    // Vary the W/L from the beforeEach default so this asserts the LIVE wiring,
+    // not a hardcoded "W 0 · L 0" — the values must reflect THIS stub.
+    global.fetch = vi.fn(async () =>
+      new Response(
+        JSON.stringify({ display_name: "N1GHTW1RE", wins: 3, losses: 2 }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    ) as unknown as typeof fetch;
+
+    const { startRouter, navigate } = await import("../src/shell/router.js");
+    startRouter();
+
+    navigate("/lobby");
+    // loadProfile() resolves on a microtask after subscribeLobby; flush twice.
+    await flush();
+    await flush();
+
+    const app = document.getElementById("app");
+    expect(app).not.toBeNull();
+    // REAL display name rendered (textContent path, never innerHTML).
+    expect(app?.textContent).toContain("N1GHTW1RE");
+    // REAL W/L line rendered from the SAME stub (proves it is live, not static).
+    expect(app?.textContent).toContain("W 3");
+    expect(app?.textContent).toContain("L 2");
+    // The smoke invariant holds on the restyled Home Hub: no canvas is created.
+    expect(document.getElementById("game-container")).toBeNull();
+  });
 });
