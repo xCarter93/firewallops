@@ -8,6 +8,7 @@ import { renderLanding } from "./pages/landing.js";
 import { renderLobby } from "./pages/lobby.js";
 import { renderRoom } from "./pages/room.js";
 import { renderPlay } from "./pages/play.js";
+import { renderHudPreview } from "./hud/hudPreviewData.js";
 
 /**
  * Framework-free hash/history mini-router for the web-app shell (Phase 5, Plan 06).
@@ -116,6 +117,15 @@ function render(): void {
   // leaving the MatchRoom is matchSession's job (Blocker 3), invoked by the play
   // page only on a real quit / RETURN TO LOBBY.
   runPageCleanup();
+
+  // DEV HUD preview (?hudpreview) — short-circuit BEFORE the auth gate so the full
+  // HUD renders with NO sign-in and NO match (presentation-only static fixture;
+  // T-06-07 — it exposes no real state). Placed after runPageCleanup() so the prior
+  // page is torn down; its cleanup is wired into pageCleanup like any route.
+  if (new URLSearchParams(window.location.search).has("hudpreview")) {
+    pageCleanup = renderHudPreview(appRoot());
+    return;
+  }
 
   // Auth gate — every route except the public landing requires a session. If not
   // signed in, requireAuth stashes the path + opens sign-in and we render the
