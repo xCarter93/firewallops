@@ -10,6 +10,7 @@
     "typecheck": "tsc --noEmit -p ."
   },
   "dependencies": {
+    "@clerk/clerk-js": "6.20.0",
     "@colyseus/sdk": "0.17.43",
     "@shared/sim": "workspace:*",
     "phaser": "4.1.0"

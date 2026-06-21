@@ -3,8 +3,22 @@ packages:
   - "harness"
 
 # pnpm 11 build-script approval (renamed from onlyBuiltDependencies; the
-# package.json `pnpm` field is no longer read). Both ship prebuilt binaries
-# for linux-x64/glibc (node:22-slim), so no compiler is needed in the image.
+# package.json `pnpm` field is no longer read). esbuild + msgpackr-extract ship
+# prebuilt binaries for linux-x64/glibc (node:22-slim), so no compiler is needed
+# in the server image.
+#
+# The four `false` entries are CLIENT-side (Vite-bundled) or OPTIONAL native
+# transitive deps pulled in by @clerk/clerk-js — none need their build/postinstall
+# to function, and denying them keeps the no-compiler server image safe:
+#   - bufferutil / utf-8-validate: OPTIONAL native ws accelerators. The browser
+#     uses native WebSocket; the server's ws falls back to pure JS without them.
+#     Flip to true post-playtest if native WS perf is ever wanted (prebuilts exist).
+#   - core-js: postinstall is only a funding message — nothing to build.
+#   - browser-tabs-lock: clerk's pure-JS cross-tab session lock — no native build.
 allowBuilds:
   esbuild: true
   msgpackr-extract: true
+  browser-tabs-lock: false
+  bufferutil: false
+  core-js: false
+  utf-8-validate: false
