@@ -8,6 +8,10 @@ export default defineConfig({
     include: [
       "packages/shared/test/**/*.test.ts",
       "packages/client/src/**/*.test.ts",
+      // The client DOM smoke test (Plan 09) lives under test/; it scopes its own
+      // jsdom environment via a `// @vitest-environment jsdom` pragma so the
+      // bare-Node default (environment: "node") still governs every other suite.
+      "packages/client/test/**/*.test.ts",
       "packages/server/test/**/*.test.ts",
     ],
   },
