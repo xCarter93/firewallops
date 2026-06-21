@@ -168,6 +168,44 @@ export async function connectToMatch(handlers: NetHandlers): Promise<Room> {
 }
 
 /**
+ * Join a SPECIFIC existing "match" room by id, carrying the Clerk session token in
+ * join OPTIONS (AUTH-03 — browsers cannot set WS headers, so the token rides the
+ * join options the server's `onAuth` reads). Used by the lobby/room flow (plan 08)
+ * and share-link deep-joins (LOBBY-05). Registers the IDENTICAL inbound listeners
+ * and persists the ROOM-SCOPED reconnection token. Wraps the SDK client — the
+ * shell's matchSession manager calls THIS, it never constructs its own Client.
+ */
+export async function joinRoomById(
+  roomId: string,
+  token: string,
+  handlers: NetHandlers,
+): Promise<Room> {
+  const client = new Client(SERVER_URL);
+  const room = await client.joinById(roomId, { token });
+  registerHandlers(room, handlers);
+  persistReconnectToken(room);
+  return room;
+}
+
+/**
+ * Create a NEW "match" room with the per-room options (mode/name) replacing the
+ * old hardcoded `MATCH_CONFIG`, carrying the Clerk session token in join OPTIONS
+ * (AUTH-03). Used by the lobby "CREATE ROOM" flow (plan 08). Registers listeners
+ * and persists the reconnection token. Wraps the SDK client (no Client in the
+ * shell's matchSession).
+ */
+export async function createMatch(
+  options: { name: string; mode: string; token: string },
+  handlers: NetHandlers,
+): Promise<Room> {
+  const client = new Client(SERVER_URL);
+  const room = await client.create("match", options);
+  registerHandlers(room, handlers);
+  persistReconnectToken(room);
+  return room;
+}
+
+/**
  * Resume a SPECIFIC match after a hard reload of `/play/:roomId` (RECON-02). Reads
  * the ROOM-SCOPED token from sessionStorage and calls `client.reconnect(token)` —
  * the reconnection token, NOT a fresh Clerk auth (onAuth/onJoin do NOT re-run, so
