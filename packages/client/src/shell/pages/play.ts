@@ -231,6 +231,11 @@ export function renderPlay(
     // Colyseus: onLeave(code) — 1000 is a normal/consented close; anything else is
     // an abnormal drop that the reconnection window covers.
     room.onLeave((code: number) => {
+      // Diagnostic (Phase-6 auto-boot investigation): log the WS close code so an
+      // abnormal drop is identifiable in the field — 1000 clean/intentional, 1001
+      // going-away (tab suspend / navigation), 1006 abnormal (ping-timeout /
+      // main-thread starvation / network loss).
+      console.warn(`[play] room.onLeave code=${code}`);
       if (disposed || matchOver) return;
       if (code === 1000) return; // a clean, intentional leave — no overlay.
       beginReconnect();
