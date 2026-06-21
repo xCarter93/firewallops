@@ -2,7 +2,6 @@ import { describe, it, expect, afterAll, beforeAll } from "vitest";
 import { spawn, type ChildProcess } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
-import { Client } from "@colyseus/sdk";
 
 /**
  * Wave-0 LAUNCHER-PARITY smoke (Codex concern #6 — Pitfall 1, container parity).
@@ -12,9 +11,15 @@ import { Client } from "@colyseus/sdk";
  * tsconfig from — so the in-process test (which already runs under the server's
  * tsconfig via Vitest) cannot reproduce a wrong-cwd launch. This test spawns the
  * server the way the CONTAINER does: `pnpm start` (= `tsx src/index.ts`) with
- * cwd = packages/server (mirrors the Dockerfile WORKDIR), then connects a REAL
- * client and joins — proving the real launcher entrypoint boots + encodes full
- * state without the crash.
+ * cwd = packages/server (mirrors the Dockerfile WORKDIR), then verifies it
+ * SERVES (GET /health → 200) — proving the real launcher entrypoint boots and
+ * stays up without the decorator/tsconfig crash. (The crash is a module-load /
+ * boot failure, so a served /health rules it out.)
+ *
+ * Room entry became auth-gated in 05-04 (onAuth verifies a Clerk token), and a
+ * SPAWNED child process cannot be module-mocked — so the authed join + full-state
+ * ENCODE assertion now lives in boot-smoke.test.ts (in-process, mockable auth).
+ * This test keeps the container-parity BOOT check.
  *
  * In-memory path only (no REDIS_URL/CONVEX_URL/REQUIRE_DEPLOY_DEPS). Generous
  * timeout because it cold-starts a child `tsx` process.
@@ -24,7 +29,6 @@ const serverDir = resolve(here, ".."); // packages/server
 
 describe("launcher-smoke: pnpm start (cwd packages/server) boots + serves (concern #6)", () => {
   let child: ChildProcess;
-  let client: Client | undefined;
   const port = 2900 + Math.floor(Math.random() * 200);
 
   beforeAll(async () => {
@@ -64,28 +68,11 @@ describe("launcher-smoke: pnpm start (cwd packages/server) boots + serves (conce
   }, 35_000);
 
   afterAll(() => {
-    // The room is left in the test body; just stop the spawned child.
-    void client;
     child?.kill("SIGTERM");
   });
 
-  it("a real client joins 'match' against the spawned server and gets full state", async () => {
-    client = new Client(`ws://127.0.0.1:${port}`);
-    const room = await client.joinOrCreate("match", {});
-
-    await new Promise<void>((resolveState, reject) => {
-      const t = setTimeout(
-        () => reject(new Error("timed out waiting for full state")),
-        10_000,
-      );
-      room.onStateChange.once((state) => {
-        clearTimeout(t);
-        expect(state).toBeDefined();
-        expect(state.mobiles.size).toBeGreaterThanOrEqual(1);
-        resolveState();
-      });
-    });
-
-    await room.leave();
+  it("the spawned server serves GET /health → 200 (booted without the decorator crash)", async () => {
+    const res = await fetch(`http://127.0.0.1:${port}/health`);
+    expect(res.status).toBe(200);
   }, 20_000);
 });

@@ -1,6 +1,20 @@
-import { describe, it, expect, afterAll, beforeAll } from "vitest";
+import { describe, it, expect, afterAll, beforeAll, vi } from "vitest";
 import { Client } from "@colyseus/sdk";
 import type { Server } from "colyseus";
+
+// 05-04 made room entry auth-gated (onAuth verifies a Clerk token + reads the
+// public handle from Convex). This is an INFRASTRUCTURE smoke test, not an auth
+// test — so we mock the two external deps (Clerk token verify + the Convex
+// reader) and pass a dummy token. The real join + full-state ENCODE path (the
+// thing this test exists to protect, Pitfall 1) still runs unmocked.
+vi.mock("@clerk/backend", () => ({
+  verifyToken: vi.fn(async () => ({ sub: "smoke-account", sid: "smoke-session" })),
+}));
+vi.mock("../src/meta/convexClient.js", () => ({
+  api: { accounts: { getByAuthUserId: "accounts:getByAuthUserId" } },
+  getConvex: () => ({ query: async () => null }),
+}));
+
 import { buildServer } from "../src/index.js";
 
 /**
@@ -55,7 +69,7 @@ describe("boot-smoke: real server boot + real join → full state (Pitfall 1)", 
   });
 
   it("joinOrCreate('match') receives a non-empty MatchState with no encoder crash", async () => {
-    const room = await client.joinOrCreate("match", {});
+    const room = await client.joinOrCreate("match", { token: "smoke-token" });
 
     // Await the first full-state patch (the moment the encoder runs).
     await new Promise<void>((resolve, reject) => {
