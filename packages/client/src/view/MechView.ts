@@ -39,6 +39,17 @@ const TEAM_DEFAULT = 0x1e293b;
 const TEAM_A = 0x2563eb; // blue-600 — Team A
 const TEAM_B = 0xdc2626; // red-600 — Team B
 
+// --- CF-1 peer-disconnect visual (Phase 6 / UI-SPEC). A disconnected mobile is
+// alpha-dimmed (mirrors room.ts's 0.5 opacity) and gets a RECONNECTING badge so
+// color is NEVER the only signal: the dim is paired with a readable label. ---
+const DISCONNECTED_ALPHA = 0.5; // mech body + barrel dim while reconnecting
+const BADGE_BG = 0x141e33; // slate surface (var(--surface)-equivalent)
+const BADGE_BORDER = 0x22d3ee; // cyan border (reserved status accent)
+const BADGE_TEXT = "RECONNECTING…"; // vector label, no emoji (repo no-emoji rule)
+const BADGE_PAD_X = 8; // horizontal text inset inside the badge rect
+const BADGE_PAD_Y = 4; // vertical text inset inside the badge rect
+const BADGE_GAP = 6; // gap above the floating HP number
+
 export class MechView {
   private readonly body: Phaser.GameObjects.Rectangle;
   private readonly barrel: Phaser.GameObjects.Line;
@@ -50,6 +61,15 @@ export class MechView {
   private readonly hpBar: Phaser.GameObjects.Graphics;
   private readonly hpNum: Phaser.GameObjects.Text;
   private hp = 100;
+
+  // CF-1 RECONNECTING badge — a slate-bg rect + cyan border + label, anchored
+  // above the HP number in WORLD space (same as the HP widget, so it tracks the
+  // mech when the camera pans). Built once, hidden until a disconnect; its
+  // position is recomputed in the SHARED updateHpLayout helper so it never drifts
+  // after settle/movement (review concern 8). `disconnected` gates show/position.
+  private readonly badgeBg: Phaser.GameObjects.Graphics;
+  private readonly badgeText: Phaser.GameObjects.Text;
+  private disconnected = false;
 
   constructor(
     private readonly scene: Phaser.Scene,
@@ -75,6 +95,19 @@ export class MechView {
         color: HP_TEXT,
       })
       .setOrigin(0.5, 1);
+
+    // CF-1 RECONNECTING badge (hidden until a disconnect). Like the HP widget it
+    // is WORLD-space (NOT scroll-locked) so it tracks the mech as the camera pans.
+    // The bg rect is drawn in updateHpLayout once the label size is known.
+    this.badgeBg = scene.add.graphics().setVisible(false);
+    this.badgeText = scene.add
+      .text(x, y, BADGE_TEXT, {
+        fontFamily: "'Fira Code'",
+        fontSize: "11px",
+        color: "#22D3EE",
+      })
+      .setOrigin(0.5, 1)
+      .setVisible(false);
 
     // Draw once so the widget shows at match start (defaults to 100).
     this.setHp(100);
@@ -119,9 +152,62 @@ export class MechView {
     g.fillRect(barLeft, barTop, HP_BAR_W * frac, HP_BAR_H);
 
     // Number centered above the bar — ALWAYS rendered (a11y), critical-red <25%.
-    this.hpNum.setPosition(x, barTop - 2);
+    const numTop = barTop - 2;
+    this.hpNum.setPosition(x, numTop);
     this.hpNum.setText(`${Math.max(0, Math.round(this.hp))}`);
     this.hpNum.setColor(critical ? HP_TEXT_CRITICAL : HP_TEXT);
+
+    // CF-1: re-anchor the RECONNECTING badge above the HP number EVERY layout
+    // pass (review concern 8) so it tracks the mech after settle/movement, not
+    // only when setConnected() fires. The badge font is ~14px tall, so the HP
+    // number top minus the badge height clears it.
+    this.layoutBadge(x, numTop - this.hpNum.height - BADGE_GAP);
+  }
+
+  /**
+   * Position + (re)draw the RECONNECTING badge so it sits centered at (cx, cy),
+   * anchored just above the HP number. Only renders when `disconnected` is true;
+   * otherwise it is left hidden. Called from the shared updateHpLayout helper so
+   * the badge re-anchors on every body/HP-bar move (settle, walk, snap).
+   */
+  private layoutBadge(cx: number, cy: number): void {
+    if (!this.disconnected) return;
+    // Anchor the text bottom at cy; bg rect wraps it with padding.
+    this.badgeText.setPosition(cx, cy);
+    const tw = this.badgeText.width;
+    const th = this.badgeText.height;
+    const rectW = tw + BADGE_PAD_X * 2;
+    const rectH = th + BADGE_PAD_Y * 2;
+    const rectLeft = cx - rectW / 2;
+    const rectTop = cy - th - BADGE_PAD_Y; // text bottom sits at cy
+
+    const g = this.badgeBg;
+    g.clear();
+    g.fillStyle(BADGE_BG, 0.92);
+    g.fillRect(rectLeft, rectTop, rectW, rectH);
+    g.lineStyle(2, BADGE_BORDER, 1);
+    g.strokeRect(rectLeft, rectTop, rectW, rectH);
+  }
+
+  /**
+   * CF-1: reflect the synced `connected` state on the canvas. A disconnected
+   * mobile is alpha-dimmed (mirrors room.ts's 0.5 opacity) and shows the
+   * RECONNECTING badge; a reconnected one restores full alpha and hides the
+   * badge. The dim is paired with the readable label so color is never the only
+   * signal. The badge's POSITION is owned by the shared updateHpLayout helper
+   * (re-anchored on every move); this only toggles visibility/alpha and triggers
+   * one immediate re-layout so it appears in the right place at once.
+   */
+  setConnected(connected: boolean): void {
+    this.disconnected = !connected;
+    const alpha = connected ? 1 : DISCONNECTED_ALPHA;
+    this.body.setAlpha(alpha);
+    this.barrel.setAlpha(alpha);
+    this.badgeBg.setVisible(this.disconnected);
+    this.badgeText.setVisible(this.disconnected);
+    // Re-anchor immediately so the badge is placed correctly the moment it shows
+    // (subsequent moves re-anchor it automatically via updateHpLayout).
+    this.updateHpLayout();
   }
 
   // Pre-built endpoint Colors for the HP lerp (HP_RED(0) → HP_GREEN(1)).
@@ -189,6 +275,8 @@ export class MechView {
     this.barrel.destroy();
     this.hpBar.destroy();
     this.hpNum.destroy();
+    this.badgeBg.destroy();
+    this.badgeText.destroy();
   }
 
   get x(): number {

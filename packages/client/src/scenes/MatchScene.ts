@@ -93,6 +93,13 @@ const BAR_CLEARANCE = 96; // bottom-bar height to clear (matches plan 03 BAR_H =
 const FRAME_FRAC = 0.66;
 const SKY_HEADROOM = 640;
 
+// --- DOM HUD migration (Phase 6). Default ON: the string "0" is the ONLY
+// off-switch (mirrors the VITE_NETWORKED parse, inverted for a default-ON flag).
+// Threaded into the NETWORKED Hud only — the DOM overlay mounts from play.ts for
+// a networked room, so suppressing the Phaser HUD there avoids a double-draw. The
+// hotseat dev boot has no overlay and ALWAYS keeps the Phaser HUD (review concern 3).
+const DOM_HUD = import.meta.env.VITE_DOM_HUD !== "0";
+
 type Phase = "AIM" | "RESOLVING" | "OVER";
 
 /** The synced Mobile shape the scene reads (server schema, read-only mirror). */
@@ -108,6 +115,13 @@ interface SyncedMobile {
   ssHitCharge: number;
   accumulatedDelay: number;
   selectedItemId: string;
+  /**
+   * CF-1: the server-authoritative reconnection flag (MatchState.Mobile.connected,
+   * already on the wire). The local mirror previously dropped it, so the gameplay
+   * canvas could not dim a disconnected peer; carried now so syncFromState can feed
+   * MechView.setConnected (dim mech + RECONNECTING badge).
+   */
+  connected: boolean;
 }
 
 /** The synced MatchState shape the scene reads. */
@@ -288,7 +302,10 @@ export class MatchScene extends Phaser.Scene {
 
     this.aimView = new AimView(this);
     this.fx = new Fx(this);
-    this.hud = new Hud(this, [P1_ID, P2_ID]);
+    // Hotseat ALWAYS keeps the Phaser HUD: the DOM overlay only mounts for a
+    // networked room (play.ts), so suppressing here would leave the dev loop with
+    // no HUD at all. domHud is hard-false regardless of VITE_DOM_HUD (concern 3).
+    this.hud = new Hud(this, [P1_ID, P2_ID], { domHud: false });
 
     this.setupCommon();
 
@@ -349,8 +366,10 @@ export class MatchScene extends Phaser.Scene {
   private createNetworked(): void {
     this.aimView = new AimView(this);
     this.fx = new Fx(this);
-    // Up to 8 mobiles (team scope) — pre-create that many HUD turn rows.
-    this.hud = new Hud(this, ["", "", "", "", "", "", "", ""]);
+    // Up to 8 mobiles (team scope) — pre-create that many HUD turn rows. The DOM
+    // overlay mounts in play.ts for this networked path, so suppress the Phaser
+    // HUD when DOM_HUD is on (default ON; VITE_DOM_HUD=0 falls back to Phaser).
+    this.hud = new Hud(this, ["", "", "", "", "", "", "", ""], { domHud: DOM_HUD });
 
     this.mechViews = {};
     this.mechs = [];
@@ -481,6 +500,11 @@ export class MatchScene extends Phaser.Scene {
       view.setBarrelAngle(mobile.angleDeg);
       view.setActive(id === state.activePlayer);
       view.setTeamColor(mobile.team);
+      // CF-1: surface the synced peer-disconnect state on the canvas (dim mech +
+      // RECONNECTING badge). Treat a missing value as connected (the field is on
+      // the wire but defaults true). Safe every patch — it only toggles
+      // alpha/visibility and re-anchors the badge, never moves the body.
+      view.setConnected(mobile.connected !== false);
 
       const rec = this.mechs.find((m) => m.id === id);
 
