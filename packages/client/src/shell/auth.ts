@@ -8,17 +8,21 @@ import { Clerk } from "@clerk/clerk-js";
  * cannot set WS headers — AUTH-03), and (c) render the Clerk prebuilt sign-in /
  * user-button UI themed to the Firewallops SOC palette.
  *
- * SPIKE OUTCOME (research Pitfall 6 — clerk-js v6 vanilla prebuilt init):
- * The shipped `@clerk/clerk-js` 6.20.0 line lazy-loads its prebuilt UI bundle
- * internally when a `mount*`/`open*` method is first called — the v6 quickstart's
- * `load({ ui: { ClerkUI: ... } })` ctor-injection (research Pitfall 6 warning) was
- * a PRE-RELEASE artifact and is NOT required by the shipped 6.x package. The
- * confirmed vanilla surface this module codes against (verify at build time):
- *   import { Clerk } from "@clerk/clerk-js"           // the Clerk class
- *   const clerk = new Clerk(publishableKey)           // ctor takes the pk_... key
- *   await clerk.load({ appearance })                  // appearance themes the UI
- *   clerk.isSignedIn: boolean                         // sync signed-in flag
- *   clerk.session?.getToken(): Promise<string|null>   // the session JWT (AUTH-03)
+ * CLERK-JS v6 PREBUILT-UI INIT (research Pitfall 6 — CONFIRMED in browser verify):
+ * clerk-js v6 SPLIT the prebuilt UI out of the npm package into a separate
+ * `@clerk/ui` bundle. `new Clerk(key)` + `await clerk.load({ appearance })` ALONE
+ * does NOT load it, so the first `openSignIn`/`mountSignIn`/`mountUserButton` call
+ * throws `Clerk was not loaded with Ui components` (assertComponentsReady). The
+ * v6 quickstart's `load({ ui: { ClerkUI } })` ctor-injection is REQUIRED (an
+ * earlier spike wrongly dismissed it as pre-release; a build-time tsc check can't
+ * catch a runtime UI-load failure — only a real browser does). The working surface:
+ *   import { Clerk } from "@clerk/clerk-js"            // the Clerk class
+ *   await loadClerkUiBundle(key)                       // inject @clerk/ui <script>
+ *   const clerk = new Clerk(publishableKey)            // ctor takes the pk_... key
+ *   await clerk.load({ appearance,                     // appearance themes the UI
+ *                      ui: { ClerkUI: window.__internal_ClerkUICtor } })
+ *   clerk.isSignedIn: boolean                          // sync signed-in flag
+ *   clerk.session?.getToken(): Promise<string|null>    // the session JWT (AUTH-03)
  *   clerk.openSignIn(props?) / clerk.mountSignIn(node, props?)
  *   clerk.mountUserButton(node, props?)
  *   clerk.signOut(): Promise<void>
@@ -105,10 +109,67 @@ function requireClerk(): Clerk {
 }
 
 /**
+ * The `@clerk/ui` prebuilt-component bundle (clerk-js v6) attaches its ctor here.
+ * `load({ ui: { ClerkUI } })` reads it; without it the open/mount methods throw
+ * `Clerk was not loaded with Ui components`.
+ */
+declare global {
+  interface Window {
+    __internal_ClerkUICtor?: unknown;
+  }
+}
+
+/**
+ * The `ui.ClerkUI` ctor type, derived structurally from `Clerk.load`'s options so
+ * we never import from `@clerk/shared` (pnpm strict isolation forbids non-direct
+ * deps — same reason the `appearance` object is structurally typed above).
+ */
+type ClerkUICtor = NonNullable<
+  NonNullable<NonNullable<Parameters<Clerk["load"]>[0]>["ui"]>["ClerkUI"]
+>;
+
+/**
+ * The `@clerk/ui` bundle URL for the instance behind `key`. The Frontend API host
+ * is the base64 body of the publishable key with the trailing `$` stripped — the
+ * documented clerk-js v6 vanilla/bundler derivation.
+ */
+function clerkUiBundleUrl(key: string): string {
+  const host = atob(key.split("_")[2] ?? "").replace(/\$+$/, "");
+  return `https://${host}/npm/@clerk/ui@1/dist/ui.browser.js`;
+}
+
+/**
+ * Inject the `@clerk/ui` bundle `<script>` and resolve once it has loaded (it sets
+ * `window.__internal_ClerkUICtor`). clerk-js v6 no longer ships the prebuilt UI in
+ * the npm package, so this MUST run before `load()` or every open/mount call throws.
+ */
+function loadClerkUiBundle(key: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const script = document.createElement("script");
+    script.src = clerkUiBundleUrl(key);
+    script.async = true;
+    script.crossOrigin = "anonymous";
+    script.onload = () => {
+      resolve();
+    };
+    script.onerror = () => {
+      reject(
+        new Error(
+          "Failed to load the @clerk/ui prebuilt-component bundle (clerk-js v6). " +
+            "Check the network/CSP and that VITE_CLERK_PUBLISHABLE_KEY is valid.",
+        ),
+      );
+    };
+    document.head.appendChild(script);
+  });
+}
+
+/**
  * Initialize Clerk once at boot. Reads `VITE_CLERK_PUBLISHABLE_KEY` (Vite inlines
- * it at build time), constructs the `Clerk` singleton, and `load()`s it with the
- * palette `appearance`. A missing publishable key throws loudly (the shell cannot
- * gate without auth). Idempotent — a second call is a no-op.
+ * it at build time), loads the `@clerk/ui` prebuilt bundle (clerk-js v6 split — see
+ * the module header), constructs the `Clerk` singleton, and `load()`s it with the
+ * palette `appearance` AND the prebuilt-UI ctor. A missing publishable key throws
+ * loudly (the shell cannot gate without auth). Idempotent — a second call is a no-op.
  */
 export async function initAuth(): Promise<void> {
   if (clerk) return;
@@ -121,8 +182,19 @@ export async function initAuth(): Promise<void> {
         "Publishable key (pk_...).",
     );
   }
+  // clerk-js v6: the prebuilt UI lives in a separate @clerk/ui bundle that load()
+  // does NOT fetch — load it first and hand its ctor to load({ ui: { ClerkUI } }),
+  // or openSignIn/mountSignIn/mountUserButton throw "not loaded with Ui components".
+  await loadClerkUiBundle(key);
+  const ctor = window.__internal_ClerkUICtor;
+  if (!ctor) {
+    throw new Error(
+      "The @clerk/ui bundle loaded but did not expose __internal_ClerkUICtor — " +
+        "cannot initialize Clerk's prebuilt components.",
+    );
+  }
   const instance = new Clerk(key);
-  await instance.load({ appearance });
+  await instance.load({ appearance, ui: { ClerkUI: ctor as ClerkUICtor } });
   clerk = instance;
 }
 
