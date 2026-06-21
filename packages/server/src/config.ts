@@ -88,9 +88,23 @@ export function resolveDwellMs(pathLength: number): number {
 export type MatchMode = "1v1" | "2v2" | "4v4";
 
 /**
- * Throwaway two-tab test config (CONTEXT: default 1v1). `teamSize` is PER-TEAM,
- * so total seats = `teamSize * 2`. Edit `teamSize` to 2 (2v2) or 4 (4v4) to
- * test the other modes locally.
+ * Per-mode PER-TEAM size (total seats = `teamSizeForMode(mode) * 2`). The room
+ * now derives its `teamSize` from its CREATE-OPTION mode (Plan 04, LOBBY-03) —
+ * mode is a per-room concern, NOT a global constant. `MATCH_CONFIG` below is kept
+ * only as a local-dev default.
+ */
+export function teamSizeForMode(mode: MatchMode): number {
+  return mode === "4v4" ? 4 : mode === "2v2" ? 2 : 1;
+}
+
+/**
+ * LOCAL-DEV DEFAULT ONLY (CONTEXT: default 1v1). `teamSize` is PER-TEAM, so total
+ * seats = `teamSize * 2`.
+ *
+ * As of Plan 04 the MatchRoom NO LONGER reads `teamSize` from this constant — it
+ * derives `teamSize` from its per-room create-option `mode` via
+ * `teamSizeForMode(mode)`. This export remains for any local-dev / legacy
+ * reference; it is no longer the room's source of truth.
  */
 export const MATCH_CONFIG: { mode: MatchMode; teamSize: number } = {
   mode: "1v1",

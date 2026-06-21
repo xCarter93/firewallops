@@ -117,6 +117,30 @@ export function seatsFull(mobileCount: number, teamSize: number): boolean {
 }
 
 /**
+ * The auto-start gate (LOBBY-04): the match auto-starts ONLY when the room is
+ * full AND every seated mobile is ready — there is NO manual master Start.
+ *
+ * PURE (no Colyseus import): the Room maps its synced mobiles to a count + a
+ * `readyFlags` boolean[] (one flag per mobile, in seat order) and delegates the
+ * decision here. `readyFlags.length === mobileCount` guards against a stale /
+ * partial snapshot (a flag must exist for every counted seat), and
+ * `readyFlags.every(Boolean)` requires unanimous ready. Locking-on-full is a
+ * SEPARATE concern owned by the Room (a full-but-not-ready room is still locked
+ * and admits no further clients) — this gate decides only START.
+ */
+export function shouldAutoStart(
+  mobileCount: number,
+  teamSize: number,
+  readyFlags: boolean[],
+): boolean {
+  return (
+    seatsFull(mobileCount, teamSize) &&
+    readyFlags.length === mobileCount &&
+    readyFlags.every(Boolean)
+  );
+}
+
+/**
  * The turn-timeout decision (NET-04). If the active mobile has COMMITTED power
  * (`powerLocked`) the Room auto-fires its last streamed aim; otherwise the Room
  * SKIPS the turn and applies FORFEIT_DELAY. The FORFEIT_DELAY add stays in the

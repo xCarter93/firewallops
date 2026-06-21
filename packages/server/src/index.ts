@@ -32,6 +32,7 @@ import { registerMetaRoutes } from "./meta/routes.js";
 import { registerHealthRoute, runBootChecks } from "./health.js";
 import { resolveRedisWiring } from "./redis.js";
 import { MatchRoom } from "./rooms/MatchRoom.js";
+import { LobbyRoom } from "./rooms/LobbyRoom.js";
 
 /**
  * Resolve the listen port from `process.env.PORT` (default 2567 — clients connect
@@ -80,6 +81,11 @@ export function buildServer(): Server {
     },
   });
 
+  // The built-in LobbyRoom is registered ABOVE the match room so its `$lobby`
+  // presence subscription is live before any MatchRoom publishes metadata
+  // (LOBBY-01/02). We do NOT call `.enableRealtimeListing()` (Assumption A1) —
+  // each MatchRoom publishes EXPLICITLY via `setMetadata` + `updateLobby`.
+  gameServer.define("lobby", LobbyRoom);
   gameServer.define("match", MatchRoom);
   return gameServer;
 }
