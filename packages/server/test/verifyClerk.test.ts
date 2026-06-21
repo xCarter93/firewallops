@@ -36,8 +36,7 @@ describe("verifyClerk", () => {
   it("maps a verified token's { sub, sid } to { accountId, sessionId } (AUTH-03)", async () => {
     verifyTokenMock.mockResolvedValue({ sub: "user_123", sid: "sess_1" });
 
-    // RED: module does not exist until plan 03 creates it → this import rejects.
-    // @ts-expect-error src/auth/clerk.js is created in plan 03 (Blocker 4: dynamic; delete on GREEN).
+    // GREEN: plan 03 created src/auth/clerk.ts → this import resolves.
     const mod = await import("../src/auth/clerk.js");
     const verifyClerk = mod.verifyClerk as VerifyClerk;
 
@@ -50,7 +49,6 @@ describe("verifyClerk", () => {
   it("rejects when the underlying verifyToken rejects (AUTH-03)", async () => {
     verifyTokenMock.mockRejectedValue(new Error("bad token"));
 
-    // @ts-expect-error src/auth/clerk.js is created in plan 03 (Blocker 4: dynamic; delete on GREEN).
     const mod = await import("../src/auth/clerk.js");
     const verifyClerk = mod.verifyClerk as VerifyClerk;
 

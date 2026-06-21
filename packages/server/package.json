@@ -18,6 +18,8 @@
     "zod": "4.4.3",
     "express": "^4.21.0",
     "cors": "2.8.6",
+    "@clerk/backend": "3.8.2",
+    "svix": "1.96.0",
     "@shared/sim": "workspace:*",
     "@firewallops/convex": "workspace:*",
     "convex": "1.41.0"
