@@ -1,35 +1,37 @@
 import { isSignedIn, openSignIn, RETURN_TO_KEY } from "../auth.js";
+import { FONT, chamfer, angledTab, edgeBar, circuitRail } from "../meshed.js";
 
 /**
- * Landing page (Design screen 02, UI-SPEC Screen Inventory #1) — the app entry /
- * gate. Restyled to the founder's Claude Design Landing 02 and extended to the full
- * marketing surface (Phase 6, Plan 05): nav + hero (`BREACH THE FIREWALL` headline,
- * `DEPLOY NOW` cyan-glow CTA) + HOW-IT-PLAYS strip + ROSTER (5 callsigns) + GAME
- * MODES + ARSENAL deep-dive + an illustrative-static STATS band + an FAQ `<details>`
- * accordion + FOOTER with a final CTA. Exact hero copy from the UI-SPEC Copywriting
- * Contract.
+ * Landing page (Design screen 02 → "SCREEN 1 — LANDING (meshed)") — the app entry /
+ * gate. Restyled to the founder's NEW "Meshed System" (Phase 6, Plan 06-MESHED-A):
+ * SOC-slate field + cyan/violet holo-chrome with the four Meshed motifs — CHAMFER,
+ * ANGLED TAB, EDGE-BAR, CIRCUIT RAIL — consumed from the shared `shell/meshed.ts`
+ * foundation. The surface keeps the full marketing set built in plan 05 (nav + hero
+ * + HOW-IT-PLAYS strip + ROSTER + GAME MODES + ARSENAL + illustrative STATS band +
+ * FAQ accordion + FOOTER) but re-skinned to the Meshed language: a chamfered nav bar
+ * with a left edge-bar, the `BREACH THE FIREWALL` hero with a circuit-rail stat band,
+ * a chamfered hero visual with bracket corners + edge-bars + TARGET-LOCK tags, and
+ * chamfered HOW-IT-PLAYS cards (CALIBRATE / FORK & FIRE / BREACH + the FREE-TO-PLAY
+ * accent card).
  *
- * RESPONSIVE PASS (UI-SPEC §Spacing "Landing responsiveness"): the page now SCROLLS
- * (overflow off `"hidden"`), every section's inner content is wrapped in a centered
- * `container()` max-width helper, multi-column bodies use CSS grid
- * `repeat(auto-fit, minmax(...))`, and display type uses `clamp()` — so the layout
- * reflows on narrow viewports with no dedicated mobile pass.
+ * RESPONSIVE PASS: the page SCROLLS (overflow-y auto), every section's inner content
+ * is wrapped in a centered `container()` max-width helper, multi-column bodies use
+ * CSS grid `repeat(auto-fit, minmax(...))`, and display type uses `clamp()` — so the
+ * layout reflows on narrow viewports with no dedicated mobile pass.
  *
- * NO-HORIZONTAL-SCROLL (06-RESEARCH Pitfall 7): removing the page-level
- * `overflow:hidden` exposes the negative-offset ambient `glow()` divs. They are
- * moved OUT of page flow into a dedicated decoration layer
- * (`position:absolute; inset:0; overflow:hidden; pointer-events:none; z-index:0`),
- * so they are clipped to the viewport and never extend the scroll width. The page
- * sets `overflowX: "hidden"` defensively; content sits above the decoration layer
- * (`z-index:1`).
+ * NO-HORIZONTAL-SCROLL (06-RESEARCH Pitfall 7): the negative-offset ambient glows
+ * live in a dedicated decoration layer (`position:absolute; inset:0; overflow:hidden;
+ * pointer-events:none; z-index:0`) so they are clipped to the viewport and never
+ * extend the scroll width. The page sets `overflowX:"hidden"` defensively; content
+ * sits above the decoration layer (`z-index:1`).
  *
- * SCOPE TRIM (UI-SPEC): the STORE/economy nav is OMITTED (economy is out of v0).
+ * SCOPE TRIM: the STORE/economy nav is OMITTED (economy is out of v0).
  *
  * Auth-gated CTAs (AUTH-01/02): every CTA — `DEPLOY NOW` / `PLAY FREE` / `SIGN IN`
- * / roster + mode + footer CTAs — calls the SAME `deploy()`: if signed in,
- * `navigate("/lobby")`; else stash `/lobby` and open the Clerk sign-in surface
- * (after sign-in the router consumes `fwops:returnTo` and lands the user on /lobby).
- * The auth gate is UNCHANGED this phase.
+ * / WATCH-TRAILER / roster + mode + footer + FREE-TO-PLAY CTAs — calls the SAME
+ * `deploy()`: if signed in, `navigate("/lobby")`; else stash `/lobby` and open the
+ * Clerk sign-in surface (after sign-in the router consumes `fwops:returnTo` and lands
+ * the user on /lobby). The auth gate is UNCHANGED this phase.
  */
 
 /** The roster callsigns shown on the landing (UI-SPEC Copywriting Contract roster
@@ -92,7 +94,8 @@ export function renderLanding(
   root.innerHTML = "";
 
   // The CTA action shared by EVERY landing CTA (DEPLOY NOW / PLAY FREE / SIGN IN /
-  // roster / modes / footer): gate on a session — UNCHANGED auth path this phase.
+  // WATCH TRAILER / roster / modes / footer / free-to-play): gate on a session —
+  // UNCHANGED auth path this phase.
   const deploy = (): void => {
     if (isSignedIn()) {
       navigate("/lobby");
@@ -116,12 +119,14 @@ export function renderLanding(
     // reflow rounding can never produce a horizontal scrollbar (Pitfall 7).
     overflowX: "hidden",
     overflowY: "auto",
-    background: "var(--bg)",
+    background: "var(--bg-deep)", // Meshed field #0B1220
+    // Meshed grid texture (faint cyan 48px mesh).
     backgroundImage:
-      "linear-gradient(rgba(34,211,238,0.035) 1px, transparent 1px), " +
-      "linear-gradient(90deg, rgba(34,211,238,0.035) 1px, transparent 1px)",
+      "linear-gradient(rgba(34,211,238,0.04) 1px, transparent 1px), " +
+      "linear-gradient(90deg, rgba(34,211,238,0.04) 1px, transparent 1px)",
     backgroundSize: "48px 48px",
     fontFamily: "var(--font-body)",
+    color: "var(--text-2)",
   } satisfies Partial<CSSStyleDeclaration>);
 
   // ---- clipped decoration layer (ambient glows live here) ----
@@ -147,18 +152,35 @@ export function renderLanding(
     zIndex: "1",
   } satisfies Partial<CSSStyleDeclaration>);
 
-  // ---- NAV ----
+  // ---- NAV (chamfered bar + left edge-bar) ----
+  const navWrap = el("div", "fw-landing-navwrap");
+  Object.assign(navWrap.style, {
+    position: "relative",
+    margin: "18px clamp(16px, 3vw, 24px) 0",
+  } satisfies Partial<CSSStyleDeclaration>);
+
+  // The chamfered bar background (absolute fill behind the nav content).
+  const navBg = document.createElement("div");
+  Object.assign(navBg.style, {
+    position: "absolute",
+    inset: "0",
+    background:
+      "linear-gradient(180deg, rgba(18,29,49,0.9), rgba(11,18,32,0.7))",
+    border: "1px solid rgba(95,200,245,0.22)",
+    clipPath: chamfer(12),
+    pointerEvents: "none",
+  } satisfies Partial<CSSStyleDeclaration>);
+
   const nav = el("nav", "fw-landing-nav");
   Object.assign(nav.style, {
     position: "relative",
-    minHeight: "74px",
+    minHeight: "60px",
     display: "flex",
     alignItems: "center",
     justifyContent: "space-between",
     gap: "16px",
     flexWrap: "wrap",
-    padding: "16px clamp(20px, 4vw, 44px)",
-    borderBottom: "1px solid var(--line-faint)",
+    padding: "10px clamp(16px, 3vw, 24px)",
   } satisfies Partial<CSSStyleDeclaration>);
 
   const brand = el("div", "fw-brand");
@@ -168,20 +190,29 @@ export function renderLanding(
     gap: "12px",
     fontFamily: "var(--font-display)",
     fontWeight: "800",
-    fontSize: "19px",
+    fontSize: "18px",
     letterSpacing: "0.08em",
     color: "var(--text)",
   } satisfies Partial<CSSStyleDeclaration>);
-  brand.innerHTML = `FIREWALL<span style="color:var(--accent)">OPS</span>`;
+  // Hex sigil + wordmark (static chrome).
+  brand.innerHTML =
+    `<span style="width:30px;height:30px;display:inline-flex;align-items:center;` +
+    `justify-content:center;clip-path:polygon(25% 0,75% 0,100% 50%,75% 100%,` +
+    `25% 100%,0 50%);background:linear-gradient(135deg,var(--glow),#0891b2)">` +
+    `<span style="width:9px;height:9px;background:var(--bg-deep);clip-path:` +
+    `polygon(25% 0,75% 0,100% 50%,75% 100%,25% 100%,0 50%)"></span></span>` +
+    `<span>FIREWALL<span style="color:var(--accent)">OPS</span></span>`;
 
   // Info nav items — STORE/economy intentionally OMITTED (scope trim).
   const navLinks = el("div", "fw-nav-links");
   Object.assign(navLinks.style, {
     display: "flex",
     alignItems: "center",
-    gap: "34px",
-    fontSize: "12px",
-    letterSpacing: "0.08em",
+    gap: "30px",
+    fontFamily: "var(--font-display)",
+    fontWeight: "500",
+    fontSize: "11px",
+    letterSpacing: "0.1em",
     color: "var(--muted)",
   } satisfies Partial<CSSStyleDeclaration>);
   navLinks.innerHTML =
@@ -192,7 +223,7 @@ export function renderLanding(
   Object.assign(navRight.style, {
     display: "flex",
     alignItems: "center",
-    gap: "16px",
+    gap: "18px",
   } satisfies Partial<CSSStyleDeclaration>);
 
   const signIn = el("button", "fw-signin");
@@ -203,58 +234,67 @@ export function renderLanding(
     border: "none",
     fontFamily: "var(--font-body)",
     fontSize: "12px",
-    letterSpacing: "0.08em",
-    color: "var(--muted)",
+    letterSpacing: "0.06em",
+    color: "var(--text-2)",
     cursor: "pointer",
   } satisfies Partial<CSSStyleDeclaration>);
   signIn.addEventListener("click", deploy);
 
+  // PLAY FREE — angled-tab cyan pill.
   const playFree = el("button", "fw-playfree");
   playFree.type = "button";
   playFree.textContent = "PLAY FREE";
   Object.assign(playFree.style, {
-    padding: "10px 22px",
-    background: "var(--accent)",
+    padding: "9px 22px",
+    background: "linear-gradient(180deg,var(--glow),var(--accent))",
     color: "var(--bg-deeper)",
     fontFamily: "var(--font-display)",
     fontWeight: "700",
-    fontSize: "12px",
+    fontSize: "11px",
     letterSpacing: "0.1em",
     border: "none",
-    borderRadius: "var(--radius-3)",
+    clipPath: angledTab(10),
+    boxShadow: "0 0 18px -4px rgba(34,211,238,0.6)",
     cursor: "pointer",
   } satisfies Partial<CSSStyleDeclaration>);
   playFree.addEventListener("click", deploy);
 
   navRight.append(signIn, playFree);
   nav.append(brand, navLinks, navRight);
+  navWrap.append(navBg);
+  // Left edge-bar (parent navWrap is position:relative).
+  navWrap.insertAdjacentHTML("beforeend", edgeBar(4, 10));
+  navWrap.append(nav);
 
   // ---- HERO ----
   const hero = el("section", "fw-hero");
   Object.assign(hero.style, { position: "relative" } satisfies Partial<CSSStyleDeclaration>);
-  const heroInner = container("1200px");
+  const heroInner = container("1280px");
   Object.assign(heroInner.style, {
     display: "grid",
-    gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 360px), 1fr))",
+    gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 380px), 1fr))",
     gap: "40px",
     alignItems: "center",
-    paddingTop: "clamp(40px, 6vw, 72px)",
+    paddingTop: "clamp(40px, 6vw, 60px)",
     paddingBottom: "clamp(24px, 4vw, 48px)",
   } satisfies Partial<CSSStyleDeclaration>);
 
   const heroLeft = el("div", "fw-hero-left");
 
+  // Eyebrow badge — angled-tab pill with a green live dot.
   const badge = el("div", "fw-hero-badge");
   Object.assign(badge.style, {
     display: "inline-flex",
     alignItems: "center",
-    gap: "8px",
-    padding: "6px 12px",
-    border: "1px solid rgba(34,211,238,0.35)",
-    borderRadius: "var(--radius-2)",
+    gap: "10px",
+    padding: "6px 14px",
+    background: "rgba(34,211,238,0.06)",
+    border: "1px solid rgba(95,200,245,0.35)",
+    clipPath: angledTab(8),
+    fontFamily: "var(--font-mono)",
     fontSize: "10px",
-    letterSpacing: "0.2em",
-    color: "var(--accent)",
+    letterSpacing: "0.18em",
+    color: "var(--glow)",
     marginBottom: "30px",
   } satisfies Partial<CSSStyleDeclaration>);
   badge.innerHTML =
@@ -265,22 +305,22 @@ export function renderLanding(
   Object.assign(h1.style, {
     fontFamily: "var(--font-display)",
     fontWeight: "900",
-    fontSize: "clamp(40px, 7vw, 74px)",
+    fontSize: "clamp(44px, 7vw, 74px)",
     lineHeight: "0.96",
     letterSpacing: "-0.01em",
     color: "var(--text)",
     margin: "0 0 8px",
   } satisfies Partial<CSSStyleDeclaration>);
-  // Exact copy: BREACH THE FIREWALL (UI-SPEC Copywriting Contract).
+  // Exact copy: BREACH THE FIREWALL, cyan "FIREWALL" (Meshed Landing).
   h1.innerHTML =
     `BREACH<br>THE <span style="color:var(--accent);` +
-    `text-shadow:0 0 32px rgba(34,211,238,0.5)">FIREWALL</span>`;
+    `text-shadow:0 0 32px rgba(34,211,238,0.55)">FIREWALL</span>`;
 
   const sub = el("p", "fw-hero-sub");
   Object.assign(sub.style, {
     fontSize: "15px",
     lineHeight: "1.7",
-    color: "var(--muted)",
+    color: "var(--text-2)",
     maxWidth: "480px",
     margin: "22px 0 36px",
   } satisfies Partial<CSSStyleDeclaration>);
@@ -294,79 +334,130 @@ export function renderLanding(
     display: "flex",
     gap: "14px",
     alignItems: "center",
-    marginBottom: "0",
+    marginBottom: "46px",
     flexWrap: "wrap",
   } satisfies Partial<CSSStyleDeclaration>);
 
+  // DEPLOY NOW — chamfered cyan-glow primary CTA (class fw-btn-primary for the test).
   const deployNow = el("button", "fw-btn-primary");
   deployNow.type = "button";
   deployNow.textContent = "DEPLOY NOW"; // exact copy — the primary focal CTA.
+  Object.assign(deployNow.style, {
+    padding: "15px 36px",
+    background: "linear-gradient(180deg,var(--glow),var(--accent))",
+    color: "var(--bg-deeper)",
+    fontFamily: "var(--font-display)",
+    fontWeight: "800",
+    fontSize: "14px",
+    letterSpacing: "0.08em",
+    border: "none",
+    clipPath: chamfer(10),
+    boxShadow: "0 0 32px -6px rgba(34,211,238,0.7)",
+    cursor: "pointer",
+  } satisfies Partial<CSSStyleDeclaration>);
   deployNow.addEventListener("click", deploy);
 
-  ctaRow.appendChild(deployNow);
-  heroLeft.append(badge, h1, sub, ctaRow);
+  // WATCH TRAILER — chamfered outline CTA (also routes through deploy()).
+  const watch = el("button", "fw-hero-watch");
+  watch.type = "button";
+  Object.assign(watch.style, {
+    display: "inline-flex",
+    alignItems: "center",
+    gap: "10px",
+    padding: "15px 28px",
+    background: "transparent",
+    border: "1px solid rgba(95,200,245,0.3)",
+    color: "var(--text)",
+    fontFamily: "var(--font-display)",
+    fontWeight: "600",
+    fontSize: "13px",
+    letterSpacing: "0.08em",
+    clipPath: chamfer(10),
+    cursor: "pointer",
+  } satisfies Partial<CSSStyleDeclaration>);
+  watch.innerHTML = `<span style="color:var(--accent)">▶</span> WATCH TRAILER`;
+  watch.addEventListener("click", deploy);
 
-  // Right hero visual — the corner-bracket HUD frame from the mockup (decorative).
+  ctaRow.append(deployNow, watch);
+
+  // ---- HERO stat band with a circuit rail (illustrative-static numbers) ----
+  const heroStats = el("div", "fw-hero-stats");
+  const rail = el("div", "fw-hero-rail");
+  Object.assign(rail.style, { marginBottom: "18px" } satisfies Partial<CSSStyleDeclaration>);
+  // Circuit-rail divider (static chrome from the foundation, no caller input).
+  rail.innerHTML = circuitRail(false);
+
+  const heroStatsNote = el("div", "fw-hero-stats-note");
+  Object.assign(heroStatsNote.style, {
+    fontFamily: "var(--font-mono)",
+    fontSize: "9px",
+    letterSpacing: "0.16em",
+    color: "var(--faint)",
+    marginBottom: "10px",
+  } satisfies Partial<CSSStyleDeclaration>);
+  heroStatsNote.textContent = "// ILLUSTRATIVE — SAMPLE NETWORK FIGURES";
+
+  const heroStatsGrid = el("div", "fw-hero-stats-grid");
+  Object.assign(heroStatsGrid.style, {
+    display: "flex",
+    flexWrap: "wrap",
+    gap: "40px",
+  } satisfies Partial<CSSStyleDeclaration>);
+  heroStatsGrid.appendChild(statCell("48,210", "AGENTS ONLINE", "var(--text)"));
+  heroStatsGrid.appendChild(statCell("2.4M", "BREACHES LOGGED", "var(--text)"));
+  heroStatsGrid.appendChild(statCell("6", "AGENT CLASSES", "var(--accent)"));
+  heroStats.append(rail, heroStatsNote, heroStatsGrid);
+
+  heroLeft.append(badge, h1, sub, ctaRow, heroStats);
+
+  // Right hero visual — chamfered frame + edge-bars + bracket corners + lock tags.
   const heroVisual = el("div", "fw-hero-visual");
   Object.assign(heroVisual.style, {
     position: "relative",
-    minHeight: "320px",
-    borderRadius: "var(--radius-6)",
-    overflow: "hidden",
-    border: "1px solid rgba(34,211,238,0.2)",
-    background:
-      "linear-gradient(160deg, rgba(30,41,59,0.6), rgba(15,23,42,0.2))",
+    minHeight: "360px",
   } satisfies Partial<CSSStyleDeclaration>);
-  heroVisual.innerHTML =
-    cornerBracket("top", "left") +
-    cornerBracket("top", "right") +
-    cornerBracket("bottom", "left") +
-    cornerBracket("bottom", "right") +
-    `<div style="position:absolute;top:24px;left:24px;font-size:10px;` +
-    `letter-spacing:0.18em;color:var(--accent);background:rgba(15,23,42,0.7);` +
-    `padding:4px 8px">◢ TARGET LOCK</div>` +
-    `<div style="position:absolute;bottom:22px;right:24px;` +
-    `font-family:var(--font-mono);font-size:11px;color:var(--muted);` +
-    `background:rgba(15,23,42,0.7);padding:4px 8px">CLASS: SENTINEL · HP 100</div>` +
-    `<div style="position:absolute;inset:0;display:flex;align-items:center;` +
-    `justify-content:center;font-family:var(--font-mono);font-size:11px;` +
+  // Chamfered gradient-border frame (1px) wrapping the chamfered field render.
+  const frame = document.createElement("div");
+  Object.assign(frame.style, {
+    position: "absolute",
+    inset: "0",
+    padding: "1px",
+    background:
+      "linear-gradient(160deg, rgba(95,200,245,0.5), rgba(40,90,120,0.2))",
+    clipPath: chamfer(18),
+  } satisfies Partial<CSSStyleDeclaration>);
+  frame.innerHTML =
+    `<div style="width:100%;height:100%;position:relative;overflow:hidden;` +
+    `clip-path:${chamfer(17)};background:linear-gradient(160deg,` +
+    `rgba(22,35,60,0.7),rgba(11,18,32,0.3));display:flex;align-items:center;` +
+    `justify-content:center;font-family:${FONT.mono};font-size:11px;` +
     `letter-spacing:0.2em;color:var(--faint)">[ FIELD RENDER ]</div>`;
+  heroVisual.appendChild(frame);
+  // Edge-bars (left + right), bracket corners, and the lock tags — static chrome.
+  heroVisual.insertAdjacentHTML(
+    "beforeend",
+    `<div style="position:absolute;left:-1px;top:40px;bottom:40px;width:3px;` +
+      `background:linear-gradient(180deg,transparent,var(--glow),var(--edge),` +
+      `transparent);box-shadow:0 0 12px var(--edge)"></div>` +
+      `<div style="position:absolute;right:-1px;top:40px;bottom:40px;width:3px;` +
+      `background:linear-gradient(180deg,transparent,var(--glow),var(--edge),` +
+      `transparent);box-shadow:0 0 12px var(--edge)"></div>` +
+      cornerBracket("top", "left") +
+      cornerBracket("bottom", "right") +
+      `<div style="position:absolute;top:22px;left:46px;font-family:${FONT.mono};` +
+      `font-size:10px;letter-spacing:0.16em;color:var(--glow);` +
+      `background:rgba(11,18,32,0.7);padding:4px 8px">◢ TARGET LOCK</div>` +
+      `<div style="position:absolute;bottom:20px;left:46px;font-family:${FONT.mono};` +
+      `font-size:11px;color:var(--text-2);background:rgba(11,18,32,0.7);` +
+      `padding:4px 8px">CLASS: SENTINEL · HP 100</div>`,
+  );
 
   heroInner.append(heroLeft, heroVisual);
   hero.appendChild(heroInner);
 
-  // ---- STATS BAND (clearly-illustrative STATIC numbers — never live counts) ----
-  const stats = section("fw-stats");
-  const statsInner = container("1200px");
-  Object.assign(statsInner.style, {
-    paddingTop: "clamp(24px, 4vw, 40px)",
-    paddingBottom: "clamp(24px, 4vw, 40px)",
-  } satisfies Partial<CSSStyleDeclaration>);
-  const statsNote = el("div", "fw-stats-note");
-  Object.assign(statsNote.style, {
-    fontSize: "9px",
-    letterSpacing: "0.16em",
-    color: "var(--faint)",
-    marginBottom: "16px",
-  } satisfies Partial<CSSStyleDeclaration>);
-  statsNote.textContent = "// ILLUSTRATIVE — SAMPLE NETWORK FIGURES";
-  const statsGrid = el("div", "fw-stats-grid");
-  Object.assign(statsGrid.style, {
-    display: "grid",
-    gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))",
-    gap: "24px",
-    borderTop: "1px solid var(--line-faint)",
-    paddingTop: "24px",
-  } satisfies Partial<CSSStyleDeclaration>);
-  statsGrid.appendChild(statCell("48,210", "AGENTS ONLINE", "var(--text)"));
-  statsGrid.appendChild(statCell("2.4M", "BREACHES LOGGED", "var(--text)"));
-  statsGrid.appendChild(statCell("6", "AGENT CLASSES", "var(--accent)"));
-  statsInner.append(statsNote, statsGrid);
-  stats.appendChild(statsInner);
-
-  // ---- HOW IT PLAYS strip ----
+  // ---- HOW IT PLAYS strip (chamfered cards w/ edge-bar + rail numbers) ----
   const strip = section("fw-howstrip");
-  const stripInner = container("1200px");
+  const stripInner = container("1280px");
   stripInner.appendChild(sectionLabel("01 / HOW IT PLAYS", "THE BREACH LOOP"));
   const stripGrid = el("div", "fw-howstrip-grid");
   Object.assign(stripGrid.style, {
@@ -376,20 +467,23 @@ export function renderLanding(
     marginTop: "24px",
   } satisfies Partial<CSSStyleDeclaration>);
   stripGrid.appendChild(
-    howCard("01", "⊹", "CALIBRATE", "var(--accent)", "Set angle & power against live packet-wind. Every degree counts."),
+    howCard("01", "⊹", "CALIBRATE", "var(--accent)", "var(--glow)", "Set angle & power against live packet-wind. Every degree counts."),
   );
   stripGrid.appendChild(
-    howCard("02", "⟁", "FORK & FIRE", "var(--accent)", "Single Packet, Forked Exploit, or charge the Trojan finisher."),
+    howCard("02", "⟁", "FORK & FIRE", "var(--accent)", "var(--glow)", "Single Packet, Forked Exploit, or charge the Trojan finisher."),
   );
   stripGrid.appendChild(
-    howCard("03", "⊗", "BREACH", "var(--danger)", "Crater the terrain, drain their HP, claim the last node standing."),
+    howCard("03", "⊗", "BREACH", "var(--danger)", "#ff7a6a", "Crater the terrain, drain their HP, claim the last node standing."),
   );
 
+  // FREE-TO-PLAY accent card (chamfered, cyan→violet wash, deploy CTA).
   const free = el("div", "fw-howstrip-free");
   Object.assign(free.style, {
-    background: "linear-gradient(135deg, rgba(34,211,238,0.14), rgba(168,85,247,0.1))",
-    border: "1px solid rgba(34,211,238,0.3)",
-    borderRadius: "var(--radius-4)",
+    position: "relative",
+    background:
+      "linear-gradient(135deg, rgba(34,211,238,0.16), rgba(168,85,247,0.12))",
+    border: "1px solid rgba(95,200,245,0.35)",
+    clipPath: chamfer(12),
     padding: "22px",
     display: "flex",
     flexDirection: "column",
@@ -400,9 +494,10 @@ export function renderLanding(
   free.innerHTML =
     `<div style="font-family:var(--font-display);font-weight:800;font-size:15px;` +
     `color:var(--text);letter-spacing:0.04em">FREE TO PLAY</div>` +
-    `<div style="font-size:11px;line-height:1.6;color:var(--text-2)">No download. ` +
+    `<div style="font-size:12px;line-height:1.6;color:#cfe9f8">No download. ` +
     `Jump into a match in under 30 seconds.</div>` +
-    `<div style="margin-top:6px;font-size:11px;letter-spacing:0.1em;color:var(--accent)">DEPLOY NOW →</div>`;
+    `<div style="margin-top:6px;font-family:var(--font-display);font-size:11px;` +
+    `letter-spacing:0.1em;color:var(--glow)">DEPLOY NOW →</div>`;
   free.addEventListener("click", deploy);
   stripGrid.appendChild(free);
   stripInner.appendChild(stripGrid);
@@ -410,15 +505,13 @@ export function renderLanding(
 
   // ---- ROSTER (5 callsigns; the 6th firewall-tank class not shown) ----
   const roster = section("fw-roster");
-  const rosterInner = container("1200px");
-  rosterInner.appendChild(
-    sectionLabel("02 / THE ROSTER", "PICK YOUR EXPLOIT"),
-  );
+  const rosterInner = container("1280px");
+  rosterInner.appendChild(sectionLabel("02 / THE ROSTER", "PICK YOUR EXPLOIT"));
   const rosterSub = el("p", "fw-roster-sub");
   Object.assign(rosterSub.style, {
     fontSize: "13px",
     lineHeight: "1.7",
-    color: "var(--muted)",
+    color: "var(--text-2)",
     maxWidth: "520px",
     margin: "14px 0 26px",
   } satisfies Partial<CSSStyleDeclaration>);
@@ -441,7 +534,7 @@ export function renderLanding(
 
   // ---- GAME MODES ----
   const modes = section("fw-modes");
-  const modesInner = container("1200px");
+  const modesInner = container("1280px");
   modesInner.appendChild(sectionLabel("03 / GAME MODES", "CHOOSE THE ENGAGEMENT"));
   const modesGrid = el("div", "fw-modes-grid");
   Object.assign(modesGrid.style, {
@@ -464,7 +557,7 @@ export function renderLanding(
 
   // ---- ARSENAL + HOW-IT-PLAYS deep-dive ----
   const arsenal = section("fw-arsenal");
-  const arsenalInner = container("1200px");
+  const arsenalInner = container("1280px");
   arsenalInner.appendChild(sectionLabel("04 / THE ARSENAL", "MASTER THE ARTILLERY"));
   const arsenalGrid = el("div", "fw-arsenal-grid");
   Object.assign(arsenalGrid.style, {
@@ -474,16 +567,16 @@ export function renderLanding(
     marginTop: "24px",
   } satisfies Partial<CSSStyleDeclaration>);
   arsenalGrid.appendChild(
-    howCard("◢", "—", "AIM", "var(--accent)", "Rotate the muzzle in a constrained arc. Read the line, commit the angle."),
+    howCard("◢", "—", "AIM", "var(--accent)", "var(--glow)", "Rotate the muzzle in a constrained arc. Read the line, commit the angle."),
   );
   arsenalGrid.appendChild(
-    howCard("▮", "—", "POWER", "var(--accent)", "Charge the payload. More power flattens the arc and crosses the gap."),
+    howCard("▮", "—", "POWER", "var(--accent)", "var(--glow)", "Charge the payload. More power flattens the arc and crosses the gap."),
   );
   arsenalGrid.appendChild(
-    howCard("≋", "—", "WIND", "var(--warn)", "Live packet-wind drifts every shot. Correct for it or watch it sail."),
+    howCard("≋", "—", "WIND", "var(--warn)", "var(--warn)", "Live packet-wind drifts every shot. Correct for it or watch it sail."),
   );
   arsenalGrid.appendChild(
-    howCard("⊗", "—", "TERRAIN", "var(--danger)", "Every hit craters the field. Destructible cover reshapes the duel turn by turn."),
+    howCard("⊗", "—", "TERRAIN", "var(--danger)", "#ff7a6a", "Every hit craters the field. Destructible cover reshapes the duel turn by turn."),
   );
   arsenalInner.appendChild(arsenalGrid);
   arsenal.appendChild(arsenalInner);
@@ -534,7 +627,7 @@ export function renderLanding(
     borderTop: "1px solid var(--line-faint)",
     background: "var(--bg-deep)",
   } satisfies Partial<CSSStyleDeclaration>);
-  const footerInner = container("1200px");
+  const footerInner = container("1280px");
   Object.assign(footerInner.style, {
     paddingTop: "clamp(40px, 5vw, 64px)",
     paddingBottom: "clamp(40px, 5vw, 64px)",
@@ -557,22 +650,36 @@ export function renderLanding(
   } satisfies Partial<CSSStyleDeclaration>);
   footerTitle.innerHTML =
     `READY TO <span style="color:var(--accent);` +
-    `text-shadow:0 0 32px rgba(34,211,238,0.5)">BREACH</span>?`;
+    `text-shadow:0 0 32px rgba(34,211,238,0.55)">BREACH</span>?`;
 
   const footerSub = el("p", "fw-footer-sub");
   Object.assign(footerSub.style, {
     fontSize: "13px",
     lineHeight: "1.7",
-    color: "var(--muted)",
+    color: "var(--text-2)",
     maxWidth: "440px",
     margin: "0",
   } satisfies Partial<CSSStyleDeclaration>);
   footerSub.textContent =
     "The firewall won't breach itself. Deploy your agent and land the first exploit.";
 
-  const footerCta = el("button", "fw-btn-primary");
+  // Final CTA — chamfered cyan-glow primary.
+  const footerCta = el("button", "fw-footer-cta");
   footerCta.type = "button";
   footerCta.textContent = "DEPLOY NOW";
+  Object.assign(footerCta.style, {
+    padding: "15px 36px",
+    background: "linear-gradient(180deg,var(--glow),var(--accent))",
+    color: "var(--bg-deeper)",
+    fontFamily: "var(--font-display)",
+    fontWeight: "800",
+    fontSize: "14px",
+    letterSpacing: "0.08em",
+    border: "none",
+    clipPath: chamfer(10),
+    boxShadow: "0 0 32px -6px rgba(34,211,238,0.7)",
+    cursor: "pointer",
+  } satisfies Partial<CSSStyleDeclaration>);
   footerCta.addEventListener("click", deploy);
 
   const footerMeta = el("div", "fw-footer-meta");
@@ -590,9 +697,8 @@ export function renderLanding(
   footer.appendChild(footerInner);
 
   content.append(
-    nav,
+    navWrap,
     hero,
-    stats,
     strip,
     roster,
     modes,
@@ -605,7 +711,7 @@ export function renderLanding(
 }
 
 /** A centered max-width wrapper (the landing's responsive `container()` helper). */
-function container(maxWidth = "1200px"): HTMLElement {
+function container(maxWidth = "1280px"): HTMLElement {
   const c = document.createElement("div");
   Object.assign(c.style, {
     width: "100%",
@@ -635,7 +741,7 @@ function sectionLabel(eyebrow: string, heading: string): HTMLElement {
     fontFamily: "var(--font-mono)",
     fontSize: "11px",
     letterSpacing: "0.18em",
-    color: "var(--accent)",
+    color: "var(--glow)",
     marginBottom: "10px",
   } satisfies Partial<CSSStyleDeclaration>);
   eb.textContent = eyebrow;
@@ -659,7 +765,7 @@ function statCell(value: string, label: string, valueColor: string): HTMLElement
   const num = document.createElement("div");
   Object.assign(num.style, {
     fontFamily: "var(--font-mono)",
-    fontSize: "clamp(24px, 4vw, 32px)",
+    fontSize: "clamp(24px, 4vw, 28px)",
     color: valueColor,
   } satisfies Partial<CSSStyleDeclaration>);
   num.textContent = value;
@@ -668,14 +774,15 @@ function statCell(value: string, label: string, valueColor: string): HTMLElement
     fontSize: "10px",
     letterSpacing: "0.12em",
     color: "var(--faint)",
-    marginTop: "4px",
+    marginTop: "2px",
   } satisfies Partial<CSSStyleDeclaration>);
   lbl.textContent = label;
   cell.append(num, lbl);
   return cell;
 }
 
-/** A roster agent-class card. `accent` is the class's signature color. */
+/** A roster agent-class card (chamfered, accent edge-bar). `accent` is the class's
+ * signature color. */
 function rosterCard(
   callsign: string,
   archetype: string,
@@ -687,16 +794,22 @@ function rosterCard(
   const card = document.createElement("div");
   Object.assign(card.style, {
     position: "relative",
-    background: "rgba(30,41,59,0.5)",
-    border: "1px solid var(--line-faint)",
-    borderTop: `2px solid ${accent}`,
-    borderRadius: "var(--radius-4)",
-    padding: "20px",
+    background:
+      "linear-gradient(180deg,rgba(18,29,49,0.6),rgba(11,18,32,0.5))",
+    border: "1px solid rgba(95,200,245,0.15)",
+    clipPath: chamfer(12),
+    padding: "22px 20px",
     display: "flex",
     flexDirection: "column",
     gap: "10px",
     cursor: "pointer",
   } satisfies Partial<CSSStyleDeclaration>);
+  // Accent edge-bar in the class's signature color (parent is position:relative).
+  card.insertAdjacentHTML(
+    "afterbegin",
+    `<div style="position:absolute;left:0;top:10px;bottom:10px;width:3px;` +
+      `background:${accent}"></div>`,
+  );
 
   const top = document.createElement("div");
   Object.assign(top.style, {
@@ -709,6 +822,7 @@ function rosterCard(
   glyphEl.textContent = glyph;
   const arch = document.createElement("span");
   Object.assign(arch.style, {
+    fontFamily: "var(--font-mono)",
     fontSize: "9px",
     letterSpacing: "0.14em",
     color: "var(--faint)",
@@ -730,7 +844,7 @@ function rosterCard(
   Object.assign(body.style, {
     fontSize: "11px",
     lineHeight: "1.6",
-    color: "var(--muted)",
+    color: "var(--text-2)",
     flex: "1",
   } satisfies Partial<CSSStyleDeclaration>);
   body.textContent = blurb;
@@ -738,6 +852,7 @@ function rosterCard(
   const cta = document.createElement("div");
   Object.assign(cta.style, {
     marginTop: "4px",
+    fontFamily: "var(--font-display)",
     fontSize: "10px",
     letterSpacing: "0.1em",
     color: accent,
@@ -749,7 +864,7 @@ function rosterCard(
   return card;
 }
 
-/** A game-mode card with a deploy CTA. */
+/** A game-mode card with a deploy CTA (chamfered). */
 function modeCard(
   tag: string,
   title: string,
@@ -758,9 +873,11 @@ function modeCard(
 ): HTMLElement {
   const card = document.createElement("div");
   Object.assign(card.style, {
-    background: "rgba(30,41,59,0.5)",
-    border: "1px solid var(--line-faint)",
-    borderRadius: "var(--radius-4)",
+    position: "relative",
+    background:
+      "linear-gradient(180deg,rgba(18,29,49,0.6),rgba(11,18,32,0.5))",
+    border: "1px solid rgba(95,200,245,0.15)",
+    clipPath: chamfer(12),
     padding: "24px",
     display: "flex",
     flexDirection: "column",
@@ -790,7 +907,7 @@ function modeCard(
   Object.assign(blurbEl.style, {
     fontSize: "11px",
     lineHeight: "1.6",
-    color: "var(--muted)",
+    color: "var(--text-2)",
     flex: "1",
   } satisfies Partial<CSSStyleDeclaration>);
   blurbEl.textContent = blurb;
@@ -808,8 +925,8 @@ function modeCard(
     fontWeight: "700",
     fontSize: "11px",
     letterSpacing: "0.1em",
-    border: "1px solid rgba(34,211,238,0.3)",
-    borderRadius: "var(--radius-3)",
+    border: "1px solid rgba(95,200,245,0.3)",
+    clipPath: angledTab(9),
     cursor: "pointer",
   } satisfies Partial<CSSStyleDeclaration>);
   cta.addEventListener("click", deploy);
@@ -822,9 +939,10 @@ function modeCard(
 function faqItem(question: string, answer: string): HTMLElement {
   const details = document.createElement("details");
   Object.assign(details.style, {
-    background: "rgba(30,41,59,0.5)",
-    border: "1px solid var(--line-faint)",
-    borderRadius: "var(--radius-4)",
+    background:
+      "linear-gradient(180deg,rgba(18,29,49,0.6),rgba(11,18,32,0.5))",
+    border: "1px solid rgba(95,200,245,0.15)",
+    clipPath: chamfer(12),
     padding: "16px 18px",
   } satisfies Partial<CSSStyleDeclaration>);
 
@@ -844,7 +962,7 @@ function faqItem(question: string, answer: string): HTMLElement {
   Object.assign(body.style, {
     fontSize: "12px",
     lineHeight: "1.7",
-    color: "var(--muted)",
+    color: "var(--text-2)",
     marginTop: "10px",
   } satisfies Partial<CSSStyleDeclaration>);
   body.textContent = answer;
@@ -853,44 +971,50 @@ function faqItem(question: string, answer: string): HTMLElement {
   return details;
 }
 
-/** A HOW-IT-PLAYS / arsenal card (number-or-glyph, accent glyph, title, body). */
+/** A HOW-IT-PLAYS / arsenal card (chamfered + left edge-bar; number-or-glyph,
+ * accent glyph, title, body). All call-site values are STATIC literals (no
+ * dynamic/user data) — safe to assemble via innerHTML. */
 function howCard(
   num: string,
   glyph: string,
   title: string,
   glyphColor: string,
+  barColor: string,
   body: string,
 ): HTMLElement {
   const card = document.createElement("div");
   Object.assign(card.style, {
-    background: "rgba(30,41,59,0.5)",
-    border: "1px solid var(--line-faint)",
-    borderRadius: "var(--radius-4)",
+    position: "relative",
+    background:
+      "linear-gradient(180deg,rgba(18,29,49,0.6),rgba(11,18,32,0.5))",
+    border: "1px solid rgba(95,200,245,0.15)",
+    clipPath: chamfer(12),
     padding: "22px",
     display: "flex",
     flexDirection: "column",
     gap: "10px",
   } satisfies Partial<CSSStyleDeclaration>);
-  // All values are STATIC literals from the call site (no dynamic/user data).
   card.innerHTML =
+    `<div style="position:absolute;left:0;top:10px;bottom:10px;width:3px;` +
+    `background:linear-gradient(180deg,${barColor},var(--edge))"></div>` +
     `<div style="display:flex;justify-content:space-between;align-items:center">` +
-    `<span style="font-family:var(--font-mono);color:var(--accent);font-size:15px">${num}</span>` +
+    `<span style="font-family:var(--font-mono);color:${barColor};font-size:13px">${num}</span>` +
     `<span style="font-size:18px;color:${glyphColor}">${glyph}</span></div>` +
     `<div style="font-family:var(--font-display);font-weight:700;font-size:15px;` +
     `color:var(--text);letter-spacing:0.04em">${title}</div>` +
-    `<div style="font-size:11px;line-height:1.6;color:var(--muted)">${body}</div>`;
+    `<div style="font-size:12px;line-height:1.6;color:var(--text-2)">${body}</div>`;
   return card;
 }
 
-/** A decorative corner bracket (the mockup HUD-frame motif). */
+/** A decorative corner bracket (the Meshed HUD-frame motif). */
 function cornerBracket(vert: "top" | "bottom", side: "left" | "right"): string {
-  const v = vert === "top" ? "top:14px" : "bottom:14px";
-  const h = side === "left" ? "left:14px" : "right:14px";
+  const v = vert === "top" ? "top:8px" : "bottom:8px";
+  const h = side === "left" ? "left:8px" : "right:8px";
   const bv = vert === "top" ? "border-top" : "border-bottom";
   const bh = side === "left" ? "border-left" : "border-right";
   return (
-    `<div style="position:absolute;${v};${h};width:26px;height:26px;` +
-    `${bv}:2px solid var(--accent);${bh}:2px solid var(--accent)"></div>`
+    `<div style="position:absolute;${v};${h};width:22px;height:22px;` +
+    `${bv}:2px solid var(--glow);${bh}:2px solid var(--glow)"></div>`
   );
 }
 
