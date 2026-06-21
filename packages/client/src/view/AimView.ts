@@ -4,7 +4,7 @@ import { buildShotInput } from "../match/aim.js";
 import { LOADOUT } from "../match/loadout.js";
 import type { ShotId } from "../match/loadout.js";
 import type { MatchController } from "../match/MatchController.js";
-import type { Mech } from "@shared/sim";
+import type { Mech, AimWindow } from "@shared/sim";
 
 /**
  * Cosmetic aim preview (Phase 2, plan 03) — PLAY-02.
@@ -27,12 +27,16 @@ export class AimView {
 
   private readonly indicator: Phaser.GameObjects.Graphics;
   private readonly arc: Phaser.GameObjects.Graphics;
+  // AIM-01: the muzzle-anchored aim-window arc gauge (always-on production UX,
+  // separate from the dev-only `arc` overlay).
+  private readonly windowArc: Phaser.GameObjects.Graphics;
   private readonly readout: Phaser.GameObjects.Text;
   private showArc = true; // ON by default in dev (no-op when DEBUG_OVERLAY off)
 
   constructor(private readonly scene: Phaser.Scene) {
     this.indicator = scene.add.graphics();
     this.arc = scene.add.graphics();
+    this.windowArc = scene.add.graphics();
     this.readout = scene.add
       .text(0, 0, "", {
         fontFamily: "'Fira Code'",
@@ -66,7 +70,43 @@ export class AimView {
   clear(): void {
     this.indicator.clear();
     this.arc.clear();
+    // AIM-01: wipe the window gauge too, so it never lingers for a spectator /
+    // when it is not the local active player's turn.
+    this.windowArc.clear();
     this.readout.setVisible(false);
+  }
+
+  /**
+   * AIM-01 window gauge: a faint cyan arc at the muzzle spanning the mech's
+   * allowed RELATIVE band [minDeg,maxDeg], with short radial ticks at each bound.
+   * `facing` maps the relative band to absolute (facing 1 unchanged, -1 mirrored);
+   * sin is single-negated for y-down, matching drawLaunchIndicator.
+   */
+  drawAimWindow(muzzle: { x: number; y: number }, facing: 1 | -1, window: AimWindow): void {
+    const R = 46;
+    const steps = 24;
+    this.windowArc.clear();
+    this.windowArc.lineStyle(2, AimView.CYAN, 0.45);
+    this.windowArc.beginPath();
+    for (let i = 0; i <= steps; i++) {
+      const rel = window.minDeg + (i / steps) * (window.maxDeg - window.minDeg);
+      const abs = facing === 1 ? rel : 180 - rel;
+      const a = Phaser.Math.DegToRad(abs);
+      const x = muzzle.x + Math.cos(a) * R;
+      const y = muzzle.y - Math.sin(a) * R;
+      if (i === 0) this.windowArc.moveTo(x, y);
+      else this.windowArc.lineTo(x, y);
+    }
+    this.windowArc.strokePath();
+    this.windowArc.lineStyle(2, AimView.CYAN, 0.85);
+    for (const rel of [window.minDeg, window.maxDeg]) {
+      const abs = facing === 1 ? rel : 180 - rel;
+      const a = Phaser.Math.DegToRad(abs);
+      this.windowArc.lineBetween(
+        muzzle.x + Math.cos(a) * (R - 6), muzzle.y - Math.sin(a) * (R - 6),
+        muzzle.x + Math.cos(a) * (R + 4), muzzle.y - Math.sin(a) * (R + 4),
+      );
+    }
   }
 
   /**

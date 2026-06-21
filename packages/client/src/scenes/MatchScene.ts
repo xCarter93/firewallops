@@ -1,5 +1,5 @@
 import Phaser from "phaser";
-import { TerrainMask } from "@shared/sim";
+import { TerrainMask, AIM_WINDOW, clampRelativeAngle, aimWindowMid } from "@shared/sim";
 import type { Mech } from "@shared/sim";
 import { MatchController } from "../match/MatchController.js";
 import {
@@ -136,8 +136,9 @@ export class MatchScene extends Phaser.Scene {
 
   private phase: Phase = "AIM";
 
-  // Live aim state.
-  private angleDeg = 45;
+  // Live aim state. AIM-01: opens centered at the window midpoint (= 50), not the
+  // old full-band 45. The relative angle is clamped into AIM_WINDOW in both loops.
+  private angleDeg = aimWindowMid();
   private power = 0;
   private charging = false;
   private dragMode = false;
@@ -741,12 +742,14 @@ export class MatchScene extends Phaser.Scene {
     if (canInput && view) {
       const dt = dtMs / 1000;
 
-      // Angle (0-90 relative; absolute via the server-synced localFacing).
+      // Angle (relative, clamped into AIM_WINDOW; absolute via the server-synced
+      // localFacing). AIM-01: the control side clamp mirrors the authoritative
+      // server clamp — the server is still the sole authority.
       if (this.cursors.up.isDown) {
-        this.angleDeg = Math.min(90, this.angleDeg + ANGLE_RATE * dt);
+        this.angleDeg = clampRelativeAngle(this.angleDeg + ANGLE_RATE * dt);
       }
       if (this.cursors.down.isDown) {
-        this.angleDeg = Math.max(0, this.angleDeg - ANGLE_RATE * dt);
+        this.angleDeg = clampRelativeAngle(this.angleDeg - ANGLE_RATE * dt);
       }
 
       // Power gauge: release FIRES.
@@ -797,6 +800,8 @@ export class MatchScene extends Phaser.Scene {
       view.setBarrelAngle(absAngle);
       const muzzle = view.getMuzzle();
       this.aimView.drawLaunchIndicator(muzzle, absAngle, this.power, this.syncedWind);
+      // AIM-01: render the allowed window arc at the muzzle for the local active player.
+      this.aimView.drawAimWindow(muzzle, this.localFacing, AIM_WINDOW);
       this.aimView.drawDevArc({
         controller: this.controller,
         mech: { id: this.sessionId, x: view.x, y: view.y, hp: 100 },
@@ -880,11 +885,12 @@ export class MatchScene extends Phaser.Scene {
     const activeView = this.mechViews[active.id];
     const activePlayer = this.activePlayerState();
 
+    // AIM-01: relative aim clamped into AIM_WINDOW (matches the networked loop).
     if (this.cursors.up.isDown) {
-      this.angleDeg = Math.min(90, this.angleDeg + ANGLE_RATE * dt);
+      this.angleDeg = clampRelativeAngle(this.angleDeg + ANGLE_RATE * dt);
     }
     if (this.cursors.down.isDown) {
-      this.angleDeg = Math.max(0, this.angleDeg - ANGLE_RATE * dt);
+      this.angleDeg = clampRelativeAngle(this.angleDeg - ANGLE_RATE * dt);
     }
 
     if (this.cursors.left.isDown) {
@@ -941,6 +947,8 @@ export class MatchScene extends Phaser.Scene {
       this.power,
       this.controller.state.wind,
     );
+    // AIM-01: window arc gauge at the muzzle for the active hotseat player.
+    this.aimView.drawAimWindow(muzzle, activePlayer.facing as 1 | -1, AIM_WINDOW);
     this.aimView.drawDevArc({
       controller: this.controller,
       mech: active,
@@ -1067,7 +1075,7 @@ export class MatchScene extends Phaser.Scene {
     this.mask = TerrainMask.fromMap(MAP);
     this.terrain = TerrainView.build(this, this.mask);
 
-    this.angleDeg = 45;
+    this.angleDeg = aimWindowMid(); // AIM-01: rematch reopens centered in-window.
     this.buildMatch();
     this.hud.reset();
 
