@@ -5,7 +5,16 @@
 // deltas (UI-03 channel 2 row pulse + CF-1 RECONNECTING state) plus the normalized
 // public contract, the action-bar mirror, row reconciliation by id, region
 // presence, the pointer-events:none root, and idempotent destroy — all without
-// Phaser or Colyseus (the overlay imports only the view-model TYPES).
+// Phaser or Colyseus (the overlay imports only the view-model TYPES + the pure
+// Meshed foundation helpers).
+//
+// VISUAL re-skin (06-MESHED-D): the overlay was re-skinned to the founder's Meshed
+// "In-Game HUD" (chamfered slate panels, glowing edge-bars, angled-tab chips, the
+// `//` circuit-rail header bands). These assertions track the FUNCTIONAL contract
+// and the view-model binding ONLY — every behavioral assertion below is unchanged
+// from the pre-re-skin suite; only the structural region-presence expectations were
+// refreshed to the new Meshed header-band labels. The `.fw-hud` root MUST remain a
+// transparent pointer-events:none pass-through (no opaque field).
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -99,6 +108,32 @@ describe("hudOverlay — region presence + contract", () => {
     expect(container.textContent).toContain("PACKET");
     expect(container.textContent).toContain("FORKED");
     expect(container.textContent).toContain("TROJAN");
+
+    handle.destroy();
+  });
+
+  it("re-skins to Meshed chrome: six regions, header bands, transparent root", () => {
+    const { container, handle } = mount();
+    handle.update(vmFixture());
+
+    // The six overlay regions are all present after the Meshed re-skin.
+    expect(container.querySelector(".fw-hud-turnorder")).not.toBeNull();
+    expect(container.querySelector(".fw-hud-windtimer")).not.toBeNull();
+    expect(container.querySelector(".fw-hud-minimap")).not.toBeNull();
+    expect(container.querySelector(".fw-hud-chat")).not.toBeNull();
+    expect(container.querySelector(".fw-hud-actionbar")).not.toBeNull();
+    expect(container.querySelector(".fw-hud-endbanner")).not.toBeNull();
+
+    // The Meshed `//` circuit-rail header bands label the panels.
+    expect(container.textContent).toContain("TURN QUEUE");
+    expect(container.textContent).toContain("TACTICAL MAP");
+
+    // The transparent pass-through root paints NO opaque field of its own.
+    const root = container.querySelector<HTMLElement>(".fw-hud");
+    expect(root?.style.background ?? "").toBe("");
+    // Region panels DO get Meshed chrome (chamfered clip-path).
+    const turnorder = container.querySelector<HTMLElement>(".fw-hud-turnorder");
+    expect(turnorder?.style.clipPath).toContain("polygon");
 
     handle.destroy();
   });
