@@ -1,5 +1,9 @@
 import { describe, it, expect } from "vitest";
-import type { TurnMobile } from "../src/match/turnMachine.js";
+import {
+  advanceTurn,
+  timeoutOutcome,
+  type TurnMobile,
+} from "../src/match/turnMachine.js";
 
 /**
  * RED until plan 05 — Wave-0 contract scaffold (05-VALIDATION.md); dynamic
@@ -75,5 +79,37 @@ describe("removeAndForfeit", () => {
       "leaver",
     );
     expect(absent.removed).toBe(false);
+  });
+});
+
+/**
+ * RECON-03 (review MEDIUM — the connection-independent timer was previously only
+ * manually covered). The Room's turn timer is connection-independent: when a
+ * DROPPED active player's turn/window elapses, `onTimeout` runs the PURE seam the
+ * Room relies on — `timeoutOutcome(active)` decides auto-fire (locked) vs skip,
+ * and the subsequent `startTurn` calls `advanceTurn(view)` to pick the NEXT
+ * active. This proves the turn advances away from the dropped player regardless of
+ * `connected`. (The full WebSocket timer wiring stays in the manual UAT; these
+ * pure helpers are the unit-testable seam.)
+ */
+describe("active-drop timeout (RECON-03)", () => {
+  it("timeoutOutcome advances regardless of connected, and advanceTurn picks a non-leaver next active", () => {
+    // The active (dropped) mobile WITHOUT a committed power → the timeout SKIPS
+    // (yields the turn). With a locked power it AUTO-FIRES. Either branch advances
+    // — neither stalls — and `connected` is not even part of the pure view.
+    const droppedSkip = mobile({ sessionId: "leaver", team: 0, powerLocked: false });
+    expect(timeoutOutcome(droppedSkip).kind).toBe("skip");
+    const droppedLocked = mobile({ sessionId: "leaver", team: 0, powerLocked: true });
+    expect(timeoutOutcome(droppedLocked).kind).toBe("auto-fire");
+
+    // After the dropped active's turn elapses and the Room advances, the next
+    // active selected from the remaining view is a DIFFERENT, living sessionId.
+    const afterRemoval: TurnMobile[] = [
+      mobile({ sessionId: "ally", team: 0, accumulatedDelay: 5 }),
+      mobile({ sessionId: "b", team: 1, accumulatedDelay: 2 }),
+    ];
+    const next = advanceTurn(afterRemoval);
+    expect(next).not.toBe("leaver");
+    expect(next).toBe("b"); // lowest accumulatedDelay among the living, post-removal.
   });
 });
