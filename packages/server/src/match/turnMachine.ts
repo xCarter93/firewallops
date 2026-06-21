@@ -141,6 +141,48 @@ export function shouldAutoStart(
 }
 
 /**
+ * The forfeit-removal decision (RECON-04 / H1) — a PURE helper deciding (a)
+ * whether the leaver was actually present (idempotency) and (b) the
+ * post-removal team-elimination outcome. The Room is the SOLE mutator: it
+ * deletes the mobile from the synced state and applies this decision; this
+ * helper touches NO Colyseus state and imports NOTHING from @colyseus.
+ *
+ * Returned `outcome`:
+ *   - `{ kind: "winner", team }` — exactly one team still has a living mobile.
+ *   - `{ kind: "draw" }`         — no team has a living mobile (mutual wipe).
+ *   - `{ kind: "continue" }`     — more than one team still living (match goes on).
+ *
+ * NOTE the `continue` rename: this is the FORFEIT outcome the Room branches on
+ * (winner → endMatch, draw → endMatchDraw, continue → advance the turn). It maps
+ * `checkWinTeam`'s `ongoing` to `continue` so the removal call site reads as a
+ * removal decision, not a post-shot win check. This helper is W/L-outcome-free:
+ * the abandoner ALWAYS takes `abandon_loss` (applied by the Room), independent of
+ * the team-elimination decision computed here.
+ *
+ * Idempotent (H1 ghost guard): if `leaverSessionId` is NOT in `view`, the caller
+ * already removed it — return `{ removed: false }` with the outcome of the view
+ * as-is (no double removal, no double team-elim).
+ */
+export type ForfeitOutcome =
+  | { kind: "winner"; team: number }
+  | { kind: "draw" }
+  | { kind: "continue" };
+
+export function forfeitOutcome(
+  view: TurnMobile[],
+  leaverSessionId: string,
+): { removed: boolean; outcome: ForfeitOutcome } {
+  const present = view.some((m) => m.sessionId === leaverSessionId);
+  const remaining = present
+    ? view.filter((m) => m.sessionId !== leaverSessionId)
+    : view;
+  const win = checkWinTeam(remaining);
+  const outcome: ForfeitOutcome =
+    win.kind === "ongoing" ? { kind: "continue" } : win;
+  return { removed: present, outcome };
+}
+
+/**
  * The turn-timeout decision (NET-04). If the active mobile has COMMITTED power
  * (`powerLocked`) the Room auto-fires its last streamed aim; otherwise the Room
  * SKIPS the turn and applies FORFEIT_DELAY. The FORFEIT_DELAY add stays in the
