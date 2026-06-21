@@ -32,7 +32,7 @@
  *   - `onLeave(client, code?: number)` (NOT consented: boolean).
  */
 import { Room, Client, validate, updateLobby } from "@colyseus/core";
-import { TerrainMask, encodeMaskRLE, muzzleOffset, LOADOUT } from "@shared/sim";
+import { TerrainMask, encodeMaskRLE, muzzleOffset, LOADOUT, clampAbsoluteAngle, aimWindowMid } from "@shared/sim";
 import type { ProjectileDef, ShotInput } from "@shared/sim";
 import { MatchState, Mobile } from "./schema/MatchState.js";
 import {
@@ -535,7 +535,12 @@ export class MatchRoom extends Room<{ state: MatchState }> {
     // auto-fire). powerLocked is set ONLY on an explicit commit/release flag
     // (Agreed Concern #6) — a mid-charge throttled aim leaves it false, so a
     // timeout on a partial charge SKIPS rather than auto-firing a half shot.
-    mobile.angleDeg = payload.angleDeg;
+    //
+    // AIM-01: clamp the streamed angle to the window BEFORE the write so the
+    // spectator barrel render AND the locked-aim value the timeout auto-fires are
+    // ALREADY in-window. Facing comes from server state, not client input.
+    const facing: 1 | -1 = mobile.facing === -1 ? -1 : 1;
+    mobile.angleDeg = clampAbsoluteAngle(payload.angleDeg, facing);
     mobile.power = payload.power;
     mobile.powerLocked = payload.committed === true;
   }
@@ -590,6 +595,15 @@ export class MatchRoom extends Room<{ state: MatchState }> {
     if (active) {
       active.powerLocked = false;
       active.power = 0;
+      // AIM-01: open the turn CENTERED in-window. Seed the angle to the window
+      // midpoint in ABSOLUTE terms for this mobile's facing, so a turn that
+      // times out before any aim auto-fires from the centered default — never a
+      // stale out-of-window value. clampAbsoluteAngle maps the relative midpoint
+      // through facing exactly like the shot seam.
+      active.angleDeg = clampAbsoluteAngle(
+        aimWindowMid(),
+        active.facing === -1 ? -1 : 1,
+      );
     }
 
     // Dwell on TURN_START so it is a distinct patch, then enter AIMING.
@@ -624,6 +638,17 @@ export class MatchRoom extends Room<{ state: MatchState }> {
     this.turnTimer?.clear();
     this.state.phase = "RESOLVING";
 
+    // AIM-01 AUTHORITATIVE clamp at the SINGLE shot-resolution seam. EVERY shot
+    // path converges here — onFire's direct call AND onTimeout's auto-fire of a
+    // (possibly stale) streamed angle — so NO path can bypass the window. Re-derive
+    // the authoritative angle from the FIRING mobile's facing (server state, never
+    // client input) and clamp into the per-mech window. A hacked client firing
+    // straight across at abs 5°, or a timeout auto-fire of a stale out-of-window
+    // value, is corrected to the window bound BEFORE muzzleOffset / runServerShot.
+    const facing: 1 | -1 = active.facing === -1 ? -1 : 1;
+    const clampedAngle = clampAbsoluteAngle(angleDeg, facing);
+    active.angleDeg = clampedAngle;
+
     const def: ProjectileDef = LOADOUT[itemId as keyof typeof LOADOUT];
 
     // Map synced mobiles → plain ServerMech[] for the pure resolver.
@@ -634,11 +659,11 @@ export class MatchRoom extends Room<{ state: MatchState }> {
 
     // Launch origin = the SHARED barrel tip (Authority Decision 4), NOT the raw
     // mobile center — so the authoritative arc matches the client aim preview.
-    const origin = muzzleOffset(active.x, active.y, angleDeg);
+    const origin = muzzleOffset(active.x, active.y, clampedAngle);
     const aim: ShotInput = {
       x: origin.x,
       y: origin.y,
-      angleDeg,
+      angleDeg: clampedAngle,
       power,
       wind: this.state.wind,
       gravity: GRAVITY,
