@@ -1,5 +1,6 @@
 import type { Room } from "@colyseus/sdk";
 import {
+  attachToMatch,
   createMatch,
   joinRoomById,
   reconnectToMatch,
@@ -56,7 +57,13 @@ class MatchSession {
     handlers: NetHandlers,
   ): Promise<Room> {
     if (this.room && this.roomId === roomId) {
-      return this.room; // idempotent rejoin — no second seat
+      // Idempotent rejoin — no second seat. BUT re-bind THIS caller's handlers to
+      // the existing room: the connection was opened earlier (e.g. lobby CREATE
+      // ROOM passes inert handlers), so without this the new page's onStateChange
+      // (renderState) never fires and its seat list stays empty. Colyseus keys
+      // listeners by type (last registration wins), so this cleanly hands the room
+      // to the new page — the same mechanism the play page uses via attachToMatch.
+      return attachToMatch(this.room, handlers);
     }
     if (this.room) {
       await this.leaveCurrent(); // switching rooms — release the previous one

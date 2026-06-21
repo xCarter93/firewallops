@@ -220,9 +220,32 @@ export function renderRoom(
   function renderState(state: SyncedState): void {
     // Auto-enter /play when the server flips phase out of WAITING (Blocker 3:
     // the play page reuses matchSession.current — no re-join, no leave here).
-    if (state.phase !== "WAITING" && !navigatedToPlay) {
+    //
+    // GUARD the unsynced default: the @colyseus/schema CLIENT rebuilds state from
+    // reflection, where `phase` is UNSYNCED (undefined / "") UNTIL the first patch
+    // decodes — NOT the server's = "WAITING" TS initializer. renderState is called
+    // once synchronously right after join() (see below) — possibly BEFORE that
+    // first patch — so a "!== WAITING" guard sees undefined and flips a freshly
+    // CREATED room straight into /play. Use an ALLOWLIST of the real in-match
+    // phases instead: undefined, "", and "WAITING" all stay on the staging room.
+    const inMatch =
+      state.phase === "TURN_START" ||
+      state.phase === "AIMING" ||
+      state.phase === "RESOLVING" ||
+      state.phase === "RESULTS";
+    if (inMatch && !navigatedToPlay) {
       navigatedToPlay = true;
       navigate(`/play/${encodeURIComponent(roomId)}`);
+      return;
+    }
+
+    // `mobiles` (a MapSchema) is undefined until the first patch decodes — same
+    // @colyseus/schema reflection gap as `phase`. The immediate renderState() call
+    // right after join() can hit this; bail until it exists (the onStateChange
+    // patch re-calls us once the seat list syncs). A bare `.forEach` here threw
+    // "Cannot read properties of undefined" → caught as a false "COULD NOT JOIN".
+    if (!state.mobiles) {
+      statusLine.textContent = "CONNECTING…";
       return;
     }
 
