@@ -89,22 +89,27 @@ function toUint8Array(payload: unknown): Uint8Array {
 }
 
 /**
- * Connect to the dev server and join (or create) the "match" room as a guest
- * (no token this phase). Registers all inbound listeners against the supplied
- * handlers and returns the live Room (the scene stores it + its sessionId for
- * the input gate, and sends aim/fire through it).
+ * The ROOM-SCOPED reconnection-token storage key (review MEDIUM — NOT a single
+ * global `fwops:recoToken`, which would clobber the token if a tab were ever in
+ * two rooms / reloaded across rooms). One token per room id, in sessionStorage so
+ * it is tab-scoped and cleared when the tab closes.
  */
-export async function connectToMatch(handlers: NetHandlers): Promise<Room> {
-  const client = new Client(SERVER_URL);
-  const room = await client.joinOrCreate("match", {});
+const recoKey = (roomId: string): string => `fwops:recoToken:${roomId}`;
 
+/**
+ * Wire ALL inbound listeners against the supplied handlers. Shared by both the
+ * fresh join (connectToMatch) and the reload reconnect (reconnectToMatch) so a
+ * resumed match registers the IDENTICAL listeners — no logic, no mutation, just
+ * forwarding server broadcasts/state to the scene.
+ */
+function registerHandlers(room: Room, handlers: NetHandlers): void {
   // NET-01: the authoritative shot outcome — the SOLE mutation trigger.
   room.onMessage("shotResult", (result: ShotResult) =>
     handlers.onShotResult(result),
   );
 
-  // NET-05: the one-time RLE terrain snapshot (raw bytes). Coerce the view to an
-  // owned Uint8Array, then decode it into a TerrainMask for the visual rebuild.
+  // NET-05: the RLE terrain snapshot (raw bytes), sent on join AND on reconnect.
+  // Coerce the view to an owned Uint8Array, then decode it into a TerrainMask.
   room.onMessage("terrainSnapshot", (payload: unknown) =>
     handlers.onTerrainSnapshot(decodeMaskRLE(toUint8Array(payload))),
   );
@@ -119,8 +124,79 @@ export async function connectToMatch(handlers: NetHandlers): Promise<Room> {
   // The full synced state on every patch — HP, wind, phase, activePlayer,
   // turnEndsAt, mobiles. syncFromState is the SOLE driver of turn/wind/HP/phase.
   room.onStateChange((state: unknown) => handlers.onStateChange(state));
+}
 
+/**
+ * Persist the room's reconnection token ROOM-SCOPED so a full page reload of
+ * `/play/:roomId` can call `reconnectToMatch(roomId)` (RECON-02). Stored on the
+ * `leave`/match-end path it is cleared (see `clearReconnectToken`). The SDK
+ * auto-reconnects TRANSIENT drops on its own; this token covers a hard reload.
+ */
+function persistReconnectToken(room: Room): void {
+  try {
+    sessionStorage.setItem(recoKey(room.roomId), room.reconnectionToken);
+    // Clear the token on a clean leave / match end so a reload after the match
+    // does NOT try to reconnect to a disposed room.
+    room.onLeave(() => clearReconnectToken(room.roomId));
+  } catch {
+    // sessionStorage unavailable (private mode / SSR) — reconnect just won't persist.
+  }
+}
+
+/** Clear a room's stored reconnection token (clean leave / match end). */
+export function clearReconnectToken(roomId: string): void {
+  try {
+    sessionStorage.removeItem(recoKey(roomId));
+  } catch {
+    /* sessionStorage unavailable — nothing to clear. */
+  }
+}
+
+/**
+ * Connect to the dev server and join (or create) the "match" room as a guest
+ * (no token this phase — the lobby-driven join + Clerk token is plan 06).
+ * Registers all inbound listeners, persists the ROOM-SCOPED reconnection token,
+ * and returns the live Room (the scene stores it + its sessionId for the input
+ * gate, and sends aim/fire through it).
+ */
+export async function connectToMatch(handlers: NetHandlers): Promise<Room> {
+  const client = new Client(SERVER_URL);
+  const room = await client.joinOrCreate("match", {});
+  registerHandlers(room, handlers);
+  persistReconnectToken(room);
   return room;
+}
+
+/**
+ * Resume a SPECIFIC match after a hard reload of `/play/:roomId` (RECON-02). Reads
+ * the ROOM-SCOPED token from sessionStorage and calls `client.reconnect(token)` —
+ * the reconnection token, NOT a fresh Clerk auth (onAuth/onJoin do NOT re-run, so
+ * the 05-04 auth gate is satisfied by the original join). Returns the resumed Room,
+ * or `null` if there is no stored token or the reconnect fails (window expired /
+ * room disposed) — the caller then falls back to a fresh join.
+ */
+export async function reconnectToMatch(
+  roomId: string,
+  handlers: NetHandlers,
+): Promise<Room | null> {
+  let tok: string | null = null;
+  try {
+    tok = sessionStorage.getItem(recoKey(roomId));
+  } catch {
+    tok = null;
+  }
+  if (!tok) return null;
+
+  const client = new Client(SERVER_URL);
+  try {
+    const room = await client.reconnect(tok);
+    registerHandlers(room, handlers);
+    persistReconnectToken(room); // refresh the token for a subsequent reload.
+    return room;
+  } catch {
+    clearReconnectToken(roomId); // stale/expired token — drop it.
+    return null;
+  }
 }
 
 /**

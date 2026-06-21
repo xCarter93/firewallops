@@ -395,9 +395,14 @@ export class MatchScene extends Phaser.Scene {
 
     let activeMobile: SyncedMobile | undefined;
     const ordered: { sessionId: string; team: number; accumulatedDelay: number }[] = [];
+    // M6: the set of sessionIds PRESENT in this synced patch. Any MechView whose id
+    // is absent is a ghost (a forfeited/removed mobile, server-side removeAndForfeit)
+    // and is destroyed after the loop.
+    const present = new Set<string>();
 
     state.mobiles.forEach((mobile, key) => {
       const id = mobile.sessionId || key;
+      present.add(id);
       this.syncedHp[id] = mobile.hp;
       this.syncedY[id] = mobile.y;
       ordered.push({
@@ -448,6 +453,22 @@ export class MatchScene extends Phaser.Scene {
         this.localFacing = mobile.facing >= 0 ? 1 : -1;
       }
     });
+
+    // M6 (stale-view removal): destroy + drop any MechView whose sessionId is no
+    // longer in the synced state (the server's removeAndForfeit deleted the mobile).
+    // Absence from synced state is AUTHORITATIVE — the server only deletes a mobile
+    // on a real removal, never on a transient patch, so the local player's own view
+    // is never dropped while it is still seated. Paired with Task 2's server-side
+    // removeAndForfeit so a forfeited mech leaves no ghost sprite.
+    for (const id of Object.keys(this.mechViews)) {
+      if (!present.has(id)) {
+        this.mechViews[id].destroy();
+        delete this.mechViews[id];
+        this.mechs = this.mechs.filter((m) => m.id !== id);
+        delete this.syncedHp[id];
+        delete this.syncedY[id];
+      }
+    }
 
     // HUD: wind, the active player's SS-charge + armed, the power meter, and the
     // N-mobile turn list (ordered by accumulatedDelay — act-next-first).
