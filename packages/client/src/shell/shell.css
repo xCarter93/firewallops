@@ -17,7 +17,10 @@
   --line: #334155; /* borders / dividers */
   --line-faint: rgba(148, 163, 184, 0.12); /* hairlines */
   --accent: #22d3ee; /* cyan — the single functional accent */
+  --glow: #5fc8f5; /* Meshed glow — edge-bars / chamfer hairlines / rail */
+  --edge: #1b9fe0; /* Meshed edge — bottom of edge-bar gradients */
   --violet: #a855f7; /* secondary identity/depth accent */
+  --violet-2: #c084fc; /* Meshed rank/season accent (lighter violet) */
   --ready: #22c55e; /* success / ready / HP-good */
   --warn: #f59e0b; /* warning / wind / HP-mid */
   --danger: #ef4444; /* destructive / danger / red team / HP-critical */
@@ -42,9 +45,10 @@
   --radius-5: 5px; /* slot rows / panels */
   --radius-6: 6px; /* screen frames / hero */
 
-  /* ---- Typography families (UI-SPEC §Typography) ---- */
-  --font-display: "Orbitron", sans-serif; /* headings / CTA — weights 700, 900 */
-  --font-body: "Fira Code", monospace; /* body / labels — weights 400, 500 */
+  /* ---- Typography families (Meshed System §Typography) ---- */
+  --font-display: "Orbitron", sans-serif; /* headings / CTA — weights 500–900 */
+  --font-body: "Saira", sans-serif; /* body / running text — weights 300–600 (Meshed) */
+  --font-alt: "Aldrich", sans-serif; /* alt headings — lobby-room title etc. */
   --font-mono: "Share Tech Mono", monospace; /* numeric / data readouts — 400 */
 }
 
