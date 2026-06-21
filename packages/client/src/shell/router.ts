@@ -10,6 +10,8 @@ import {
 type PhaserGame = PhaserNamespace.Game;
 import { matchSession } from "./net/matchSession.js";
 import { renderLanding } from "./pages/landing.js";
+import { renderLobby } from "./pages/lobby.js";
+import { renderRoom } from "./pages/room.js";
 
 /**
  * Framework-free hash/history mini-router for the web-app shell (Phase 5, Plan 06).
@@ -41,6 +43,22 @@ import { renderLanding } from "./pages/landing.js";
 
 /** The play-route Phaser instance (null when not on /play). Router-owned. */
 let activeGame: PhaserGame | null = null;
+
+/**
+ * The current DOM page's cleanup fn (lobby/room return one to tear down their
+ * light LobbyRoom subscription / listeners on nav-away). Called before rendering
+ * the next route so a page never leaks its subscription. NOTE: a page cleanup is
+ * NOT a match leave — leaving the MatchRoom is matchSession's job (Blocker 3).
+ */
+let pageCleanup: (() => void) | null = null;
+
+/** Run + clear the current page's cleanup fn (idempotent). */
+function runPageCleanup(): void {
+  if (pageCleanup) {
+    pageCleanup();
+    pageCleanup = null;
+  }
+}
 
 /** The id the active Phaser match was mounted for (for the room→play reuse check). */
 let activePlayRoomId: string | null = null;
@@ -141,6 +159,10 @@ async function render(): Promise<void> {
   const path = window.location.pathname;
   const route = parse(path);
 
+  // Tear down the previous DOM page's subscription/listeners before rendering the
+  // next route (lobby/room return a cleanup fn). This is NOT a match leave.
+  runPageCleanup();
+
   // Auth gate — every route except the public landing requires a session. If not
   // signed in, requireAuth stashes the path + opens sign-in and we render the
   // landing as the backdrop; the auth listener re-navigates after sign-in.
@@ -163,16 +185,15 @@ async function render(): Promise<void> {
       renderLanding(root, navigate);
       return;
     case "lobby":
-      // Plan 08 replaces this with the home hub + LobbyRoom room list.
-      renderPlaceholder(root, "LOBBY", "Room list lands in plan 08.");
+      // Home hub + live LobbyRoom room list (plan 08). Returns a cleanup fn that
+      // closes the light LobbyRoom subscription on nav-away.
+      pageCleanup = renderLobby(root, navigate);
       return;
     case "room":
-      // Plan 08 replaces this with the lobby room / ready screen.
-      renderPlaceholder(
-        root,
-        "ROOM",
-        `Lobby room ${route.roomId ?? ""} lands in plan 08.`,
-      );
+      // Lobby room / ready screen (plan 08). Joins the MatchRoom via matchSession
+      // (Blocker 3). Cleanup detaches listeners but does NOT leave the match (the
+      // room→play transition reuses the connection).
+      pageCleanup = renderRoom(root, route.roomId ?? "", navigate);
       return;
     case "play":
       await mountPlay(root, route.roomId ?? "");
