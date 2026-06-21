@@ -153,6 +153,69 @@ export function clearReconnectToken(roomId: string): void {
 }
 
 /**
+ * Module-level handoff of the ALREADY-JOINED MatchRoom from the shell to the
+ * Phaser scene (Blocker 3). The shell's play page (plan 09) reads
+ * `matchSession.current` — the SINGLE connection the room page joined — and calls
+ * `provideMatchRoom(room)` BEFORE instantiating Phaser. `MatchScene.createNetworked`
+ * then calls `takeProvidedMatchRoom()`: if a room is present it ADOPTS it (registers
+ * its handlers on the SAME seat via `attachToMatch`) instead of opening a second
+ * Colyseus `Client` through `connectToMatch`. This is the seam that closes the
+ * duplicate-connection hazard — the room→play transition never opens a new seat.
+ *
+ * `take` is one-shot (clears the slot) so a later standalone `VITE_NETWORKED` boot
+ * (no shell, no provided room) still falls through to `connectToMatch`.
+ */
+let providedRoom: Room | null = null;
+
+/** Hand the already-joined MatchRoom to the next MatchScene boot (Blocker 3). */
+export function provideMatchRoom(room: Room): void {
+  providedRoom = room;
+}
+
+/** Take (and clear) the provided MatchRoom, or `null` if none was provided. */
+export function takeProvidedMatchRoom(): Room | null {
+  const room = providedRoom;
+  providedRoom = null;
+  return room;
+}
+
+/**
+ * The shell's match-end hook (UI-SPEC #9 post-match banner). The SCENE is the
+ * single owner of the room's `onMessage`/`onStateChange` listeners (Colyseus keys
+ * those by type — a second `onMessage("matchEnded")` would CLOBBER the scene's).
+ * So instead of the play page registering its own `matchEnded` listener (a
+ * silent-overwrite bug), it registers THIS hook, which `MatchScene.onMatchEnded`
+ * fans out to AFTER it deactivates the views. One listener, two consumers.
+ */
+let shellMatchEndHook: ((winnerTeam: number, draw: boolean) => void) | null =
+  null;
+
+/** Register the shell-side post-match callback (the play page's banner). */
+export function setShellMatchEndHook(
+  cb: ((winnerTeam: number, draw: boolean) => void) | null,
+): void {
+  shellMatchEndHook = cb;
+}
+
+/** Invoked by MatchScene.onMatchEnded to fan the match-end out to the shell. */
+export function notifyShellMatchEnded(winnerTeam: number, draw: boolean): void {
+  shellMatchEndHook?.(winnerTeam, draw);
+}
+
+/**
+ * Attach the scene's inbound listeners to an ALREADY-JOINED room (Blocker 3). Used
+ * by the play-page handoff: the room was joined by the shell's matchSession (ONE
+ * seat); this only registers the IDENTICAL listeners + refreshes the room-scoped
+ * reconnection token. It does NOT construct a `Client` and does NOT join — so it
+ * never opens a second seat. Returns the same room for convenience.
+ */
+export function attachToMatch(room: Room, handlers: NetHandlers): Room {
+  registerHandlers(room, handlers);
+  persistReconnectToken(room);
+  return room;
+}
+
+/**
  * Connect to the dev server and join (or create) the "match" room as a guest
  * (no token this phase — the lobby-driven join + Clerk token is plan 06).
  * Registers all inbound listeners, persists the ROOM-SCOPED reconnection token,

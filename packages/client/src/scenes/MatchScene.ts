@@ -19,7 +19,15 @@ import { ProjectileView } from "../view/ProjectileView.js";
 import { Fx } from "../view/Fx.js";
 import { Hud } from "../view/Hud.js";
 import type { MatchSceneData } from "./BootScene.js";
-import { connectToMatch, sendAim, sendFire, sendSelectItem } from "../net/room.js";
+import {
+  attachToMatch,
+  connectToMatch,
+  notifyShellMatchEnded,
+  sendAim,
+  sendFire,
+  sendSelectItem,
+  takeProvidedMatchRoom,
+} from "../net/room.js";
 import { ShotResultBridge } from "../net/shotResultBridge.js";
 import type { Room } from "@colyseus/sdk";
 import {
@@ -349,25 +357,41 @@ export class MatchScene extends Phaser.Scene {
     // The bridge is the single mutation source: server shotResult → animateShot.
     const bridge = new ShotResultBridge(this);
 
-    void connectToMatch({
+    const handlers = {
       onShotResult: bridge.onShotResult,
-      onTerrainSnapshot: (mask) => this.rebuildTerrain(mask),
-      onMatchEnded: (winnerTeam, draw) => this.onMatchEnded(winnerTeam, draw),
-      onStateChange: (s) => this.syncFromState(s as SyncedState),
-    })
-      .then((room) => {
-        this.room = room;
-        this.sessionId = room.sessionId;
-        // Inject the fire sender so applyShot forwards the ABSOLUTE sim angle
-        // (the server schema validates 0..180). The seam stays live: the scene
-        // still calls controller.applyShot; the controller forwards here.
-        this.controller.setFireSender((aim) =>
-          sendFire(this.room!, aim.angleDeg, aim.power, this.selectedShotId),
-        );
-      })
-      .catch((err: unknown) => {
-        console.error("[net] failed to join match", err);
-      });
+      onTerrainSnapshot: (mask: TerrainMask) => this.rebuildTerrain(mask),
+      onMatchEnded: (winnerTeam: number, draw: boolean) =>
+        this.onMatchEnded(winnerTeam, draw),
+      onStateChange: (s: unknown) => this.syncFromState(s as SyncedState),
+    };
+
+    // Bind the controller's fire sender once we hold the room (shared by both the
+    // adopted-room handoff and the standalone connect path). The seam stays live:
+    // the scene still calls controller.applyShot; the controller forwards here
+    // with the ABSOLUTE sim angle (the server schema validates 0..180).
+    const bindRoom = (room: Room): void => {
+      this.room = room;
+      this.sessionId = room.sessionId;
+      this.controller.setFireSender((aim) =>
+        sendFire(this.room!, aim.angleDeg, aim.power, this.selectedShotId),
+      );
+    };
+
+    // BLOCKER 3: prefer the room the SHELL already joined (provided via the play
+    // page from matchSession.current). Adopting it registers the scene's listeners
+    // on the SAME seat — no second Colyseus Client, no second seat. Only a
+    // standalone VITE_NETWORKED dev boot (no shell, no provided room) falls through
+    // to connectToMatch (which opens its own connection — dev-only).
+    const adopted = takeProvidedMatchRoom();
+    if (adopted) {
+      bindRoom(attachToMatch(adopted, handlers));
+    } else {
+      void connectToMatch(handlers)
+        .then(bindRoom)
+        .catch((err: unknown) => {
+          console.error("[net] failed to join match", err);
+        });
+    }
   }
 
   /**
@@ -648,6 +672,11 @@ export class MatchScene extends Phaser.Scene {
     for (const view of Object.values(this.mechViews)) view.setActive(false);
     const text = draw ? "DRAW" : `TEAM ${winnerTeam === 0 ? "A" : "B"} WINS`;
     this.hud.showResultBanner(text);
+    // Fan the match-end out to the shell so the play page can render the UI-SPEC
+    // post-match banner (RETURN TO LOBBY). The scene stays the SINGLE owner of the
+    // room listeners (Blocker 3) — the shell consumes via this hook, not a second
+    // onMessage("matchEnded") that would clobber this handler.
+    notifyShellMatchEnded(winnerTeam, draw);
   }
 
   /** Networked input gate: local + active + AIMING + not animating. */
