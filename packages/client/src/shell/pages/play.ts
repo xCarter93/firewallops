@@ -4,6 +4,9 @@ import { getToken } from "../auth.js";
 import { matchSession } from "../net/matchSession.js";
 import { provideMatchRoom, setShellMatchEndHook } from "../../net/room.js";
 import type { NetHandlers } from "../../net/room.js";
+import { mountHudOverlay } from "../hud/hudOverlay.js";
+import { bindHudToRoom } from "../hud/hudBinding.js";
+import type { HudViewModel } from "../hud/hudViewModel.js";
 import {
   classifyJoinError,
   RECONNECT_WINDOW_SECONDS,
@@ -42,6 +45,20 @@ import {
 
 type PhaserGame = PhaserNamespace.Game;
 
+/**
+ * VITE_DOM_HUD selects the Phase-6 DOM HUD overlay. Default ON: `"0"` is the ONLY
+ * off-switch (Pitfall 5 — never test truthiness of the raw string). When OFF, the
+ * overlay is never mounted and the legacy Phaser HUD shows (plan 02 threads
+ * `domHud: false` to MatchScene in that case).
+ */
+const DOM_HUD = import.meta.env.VITE_DOM_HUD !== "0";
+
+/** The ONE normalized overlay contract shared with 06-03 + the binding (concern 6). */
+type HudOverlay = {
+  update(vm: HudViewModel, countdownText?: string): void;
+  destroy(): void;
+};
+
 /** The synced shape the play page reads to resolve the local team (read-only). */
 interface SyncedMobile {
   sessionId: string;
@@ -66,6 +83,9 @@ export function renderPlay(
 ): () => void {
   let game: PhaserGame | null = null;
   let disposed = false;
+  /** The DOM HUD overlay handle + its rAF disposer (Phase 6). Null when !DOM_HUD. */
+  let overlay: HudOverlay | null = null;
+  let stopHudRaf: (() => void) | null = null;
   let reconnecting: ReconnectingOverlay | null = null;
   let countdownTimer: ReturnType<typeof setInterval> | null = null;
   let matchOver = false;
@@ -78,6 +98,14 @@ export function renderPlay(
 
   /** Tear down Phaser + the container (Pitfall 5). NOT a match leave. */
   const teardownPhaser = (): void => {
+    // Cancel the HUD rAF + destroy the overlay BEFORE the Phaser game is destroyed
+    // and the container removed (Pitfall 1 idempotent, Pitfall 2 ordering). Because
+    // mountPhaser calls teardownPhaser() at its top, a reconnect remount cleans the
+    // previous overlay first — no leaked rAF, no double loop.
+    stopHudRaf?.();
+    stopHudRaf = null;
+    overlay?.destroy();
+    overlay = null;
     if (game) {
       game.destroy(true);
       game = null;
@@ -112,12 +140,32 @@ export function renderPlay(
     container.id = "game-container"; // GAME_CONFIG.parent === "game-container"
     container.style.width = "100vw";
     container.style.height = "100vh";
+    // Pitfall 4: the overlay roots at `position:absolute; inset:0`, so the canvas
+    // container must be a positioned ancestor for it to anchor to the canvas.
+    container.style.position = "relative";
     root.appendChild(container);
 
     // BLOCKER 3: hand the ALREADY-JOINED room to the scene so MatchScene adopts
     // it (registers its listeners on the SAME seat) instead of opening a second
     // Colyseus Client. No re-join, no second seat across the room→play swap.
     provideMatchRoom(room);
+
+    // Phase 6 DOM HUD: mount the overlay over the canvas container and drive it
+    // from an rAF tick that READS room.state snapshots (listener-ownership
+    // invariant — bindHudToRoom registers NO Colyseus listener; MatchScene owns the
+    // single one). Cancelled + destroyed in teardownPhaser BEFORE game.destroy, and
+    // also registered via track() so cleanup() tears it down. Gated by VITE_DOM_HUD;
+    // when OFF the overlay is not mounted and the legacy Phaser HUD shows.
+    if (DOM_HUD) {
+      overlay = mountHudOverlay(container);
+      stopHudRaf = bindHudToRoom(room, overlay, () => disposed);
+      track(() => {
+        stopHudRaf?.();
+        stopHudRaf = null;
+        overlay?.destroy();
+        overlay = null;
+      });
+    }
 
     void (async () => {
       // Dynamic import keeps Phaser off the top-level chunk — loaded ONLY on /play.
