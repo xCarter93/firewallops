@@ -348,6 +348,9 @@ export class MatchRoom extends Room<{ state: MatchState }> {
    * so a never-returning drop self-resolves at the window edge with no stall.
    */
   async onDrop(client: Client, _code?: number): Promise<void> {
+    console.log(
+      `[match] onDrop ${client.sessionId} phase=${this.state.phase} code=${String(_code)} — opening 30s reconnection window`,
+    );
     const m = this.state.mobiles.get(client.sessionId);
     if (m) m.connected = false;
     void this.refreshListing();
@@ -355,8 +358,12 @@ export class MatchRoom extends Room<{ state: MatchState }> {
       // RECON-01: 30s window (MUST pass the count — never the deprecated no-arg form).
       await this.allowReconnection(client, 30);
       // Resolved → the client reconnected; onReconnect handled the snapshot resend.
+      console.log(`[match] reconnected ${client.sessionId}`);
     } catch {
       // Window expired → the single idempotent removal path (Pitfall 2).
+      console.log(
+        `[match] reconnection window expired ${client.sessionId} → removeAndForfeit`,
+      );
       this.removeAndForfeit(client.sessionId);
     }
   }

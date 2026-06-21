@@ -151,6 +151,14 @@ export class MatchScene extends Phaser.Scene {
 
   // --- Networked state (Phase 3) ---
   private networked = false;
+  /**
+   * Set on scene SHUTDOWN. The single Colyseus connection OUTLIVES the Phaser scene
+   * (Blocker 3 — matchSession keeps it across /room→/play and after teardown), so a
+   * late onStateChange/onMatchEnded would otherwise fire on destroyed Graphics/Text
+   * and throw "Cannot read properties of null (reading 'drawImage')". Late callbacks
+   * early-return on this flag.
+   */
+  private disposed = false;
   private room?: Room;
   private sessionId = "";
   private syncedPhase = "WAITING";
@@ -264,6 +272,13 @@ export class MatchScene extends Phaser.Scene {
     this.events.once(Phaser.Scenes.Events.SHUTDOWN, () =>
       this.scale.off(Phaser.Scale.Events.RESIZE, this.onResize, this),
     );
+
+    // Blocker 3: the room connection survives this scene. Mark disposed on SHUTDOWN
+    // so any in-flight Colyseus patch/broadcast that arrives after teardown is
+    // ignored instead of drawing into destroyed Phaser objects (drawImage-null).
+    this.events.once(Phaser.Scenes.Events.SHUTDOWN, () => {
+      this.disposed = true;
+    });
   }
 
   // ───────────────────────────── hotseat (Phase 2 default) ─────────────────────────────
@@ -386,6 +401,12 @@ export class MatchScene extends Phaser.Scene {
     const adopted = takeProvidedMatchRoom();
     if (adopted) {
       bindRoom(attachToMatch(adopted, handlers));
+      // The adopted room's schema is ALREADY synced (from the staging room), and
+      // Colyseus onStateChange fires only on the NEXT patch — so without an explicit
+      // initial sync the adopting client (the room CREATOR) renders no mechs and
+      // never sets its input gate, so it misses turn 1 and gets auto-forfeited. Mirror
+      // room.ts's post-join immediate render. syncFromState guards the unsynced shape.
+      this.syncFromState(adopted.state as SyncedState);
     } else {
       void connectToMatch(handlers)
         .then(bindRoom)
@@ -404,6 +425,13 @@ export class MatchScene extends Phaser.Scene {
    * Concern #2). NO P1/P2 hardcoding — mobiles are keyed by sessionId.
    */
   private syncFromState(state: SyncedState): void {
+    // Late patch after teardown → the scene's Phaser objects are destroyed (Blocker 3
+    // keeps the connection alive past SHUTDOWN). Ignore it (drawImage-null guard).
+    if (this.disposed) return;
+    // `mobiles` (MapSchema) is undefined until the first patch decodes. The immediate
+    // adopt-sync (createNetworked) can pass an unsynced state on a true cold join;
+    // bail until it exists — the next onStateChange patch re-syncs.
+    if (!state.mobiles) return;
     // Map the server enum → local gate (do NOT reuse the old local "AIM" literal).
     this.syncedPhase = state.phase;
     this.activePlayerId = state.activePlayer;
@@ -668,6 +696,9 @@ export class MatchScene extends Phaser.Scene {
    * R-rematch is NOT bound in networked mode — reload/rejoin to replay (Phase 6).
    */
   private onMatchEnded(winnerTeam: number, draw: boolean): void {
+    // A matchEnded broadcast arriving after teardown would draw the banner into a
+    // destroyed HUD (drawImage-null). Ignore once the scene is gone (Blocker 3).
+    if (this.disposed) return;
     this.phase = "OVER";
     this.syncedPhase = "RESULTS";
     for (const view of Object.values(this.mechViews)) view.setActive(false);
