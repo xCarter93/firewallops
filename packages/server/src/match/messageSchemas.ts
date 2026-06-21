@@ -50,17 +50,37 @@ export const selectItemSchema = z.object({
 });
 export type SelectItemMessage = z.infer<typeof selectItemSchema>;
 
+/** Per-player explicit OUTCOME enum (Phase-5 Blocker 2 — NO boolean `won`). */
+export const OUTCOMES = ["win", "loss", "draw", "abandon_loss"] as const;
+
 /**
- * `POST /internal/match-results` body schema (review H7).
+ * `POST /internal/match-results` body schema (review H7 + Phase-5 Blocker 2).
  *
  * The match-results write endpoint is service-to-service (gated by a shared
  * secret in routes.ts); this schema is the validation half — a request that fails
- * it is rejected with 400 before any record. `winnerTeam` is the finite team
- * index (-1 is the draw sentinel the room uses). `resultId` is the REQUIRED
- * idempotency key the route de-dups on so a retried/duplicate write is a no-op.
+ * it is rejected with 400 before any record.
+ *   - `winnerTeam` — the finite team index (-1 is the draw sentinel) kept for the
+ *     broadcast/legacy path.
+ *   - `resultId` — the EVENT-level idempotency key the route ledger de-dups on
+ *     (`${roomId}:final` vs `${roomId}:abandon:${accountId}`), so the final and
+ *     abandon writes are NOT collapsed by the route ledger.
+ *   - `players` — per-player EXPLICIT outcomes (Blocker 2): each carries its OWN
+ *     granular per-player+event `resultId` = `${roomId}:${event}:${accountId}` so
+ *     the Convex `result_events` table dedups per player+event. NO boolean `won`,
+ *     so a draw is `draw` (neither) and an abandon is `abandon_loss` (a loss) with
+ *     no self-contradiction.
  */
 export const matchResultSchema = z.object({
   winnerTeam: z.number().int(),
   resultId: z.string().min(1),
+  players: z
+    .array(
+      z.object({
+        accountId: z.string().min(1),
+        outcome: z.enum(OUTCOMES),
+        resultId: z.string().min(1),
+      }),
+    )
+    .optional(),
 });
 export type MatchResultMessage = z.infer<typeof matchResultSchema>;

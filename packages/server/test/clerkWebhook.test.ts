@@ -26,7 +26,11 @@ const { verifyMock, WebhookMock } = vi.hoisted(() => {
   const verifyMock = vi.fn();
   return {
     verifyMock,
-    WebhookMock: vi.fn().mockImplementation(() => ({ verify: verifyMock })),
+    // Regular function (not an arrow) so the handler's `new Webhook(...)` works —
+    // arrow functions are not constructors. Returning an object makes `new` yield it.
+    WebhookMock: vi.fn(function () {
+      return { verify: verifyMock };
+    }),
   };
 });
 vi.mock("svix", () => ({ Webhook: WebhookMock }));
@@ -67,7 +71,7 @@ describe("clerk webhook", () => {
     const provision = vi.fn();
     const { res, captured } = makeRes();
 
-    // @ts-expect-error src/meta/webhooks.js is created in plan 03 (Blocker 4: dynamic; delete on GREEN).
+    // GREEN: plan 03 created src/meta/webhooks.ts → this import resolves.
     const mod = await import("../src/meta/webhooks.js");
     const clerkWebhookHandler = mod.clerkWebhookHandler as ClerkWebhookHandler;
 
@@ -89,7 +93,6 @@ describe("clerk webhook", () => {
     const provision = vi.fn();
     const { res, captured } = makeRes();
 
-    // @ts-expect-error src/meta/webhooks.js is created in plan 03 (Blocker 4: dynamic; delete on GREEN).
     const mod = await import("../src/meta/webhooks.js");
     const clerkWebhookHandler = mod.clerkWebhookHandler as ClerkWebhookHandler;
 

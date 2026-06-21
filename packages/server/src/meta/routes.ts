@@ -25,6 +25,9 @@ import cors from "cors";
 import { getLoadout } from "./loadout.js";
 import { recordMatchResult } from "./results.js";
 import { matchResultSchema } from "../match/messageSchemas.js";
+import { clerkWebhookHandler } from "./webhooks.js";
+import { verifyClerk } from "../auth/clerk.js";
+import { getConvex, api } from "./convexClient.js";
 
 /**
  * Bare loadout handler — structural req/res so it is testable without Express.
@@ -120,10 +123,84 @@ export function registerMetaRoutes(app: Application): void {
   // intentionally untouched (WS handshakes are not CORS-preflighted).
   app.use("/internal", cors({ origin: allowed.length ? allowed : false }));
 
+  // ── RAW-BODY ROUTE FIRST (Pitfall 3 / T-05-AUTH-01) ──────────────────────
+  // The Clerk webhook MUST be registered BEFORE any `express.json()` route so no
+  // json parser ever sees its body: Svix verifies the EXACT raw bytes Clerk
+  // signed, and a re-serialized json body would fail HMAC. `express.raw` keeps
+  // `req.body` as a Buffer of the original bytes. This line precedes ALL
+  // `express.json()` registrations below (route-order invariant).
+  app.post(
+    "/internal/webhooks/clerk",
+    express.raw({ type: "application/json" }),
+    (req, res) =>
+      clerkWebhookHandler({ headers: req.headers, body: req.body }, res),
+  );
+
   app.get("/internal/loadout/:accountId", (req, res) =>
     loadoutHandler({ params: { accountId: req.params.accountId } }, res),
   );
+
+  // ── Bearer-verified profile read/write (AUTH-04, Blocker 1 / T-05-AUTH-02) ─
+  // The public game handle = `accounts.display_name`. Both routes require a valid
+  // Clerk Bearer token; the accountId comes from the verified `sub`, NEVER the
+  // request body, so a caller cannot read/write another player's profile.
+  app.get("/internal/profile", express.json(), (req, res) => {
+    void (async () => {
+      const accountId = await bearerAccountId(req, res);
+      if (!accountId) return;
+      const row = await getConvex().query(api.accounts.getByAuthUserId, {
+        authUserId: accountId,
+      });
+      res.status(200).json(row ?? null);
+    })();
+  });
+
+  app.post("/internal/profile", express.json(), (req, res) => {
+    void (async () => {
+      const accountId = await bearerAccountId(req, res);
+      if (!accountId) return;
+      const displayName = (req.body as { displayName?: unknown })?.displayName;
+      if (typeof displayName !== "string" || displayName.length === 0) {
+        res.status(400).end();
+        return;
+      }
+      await getConvex().mutation(api.accounts.setDisplayName, {
+        authUserId: accountId,
+        displayName,
+      });
+      res.status(200).end();
+    })();
+  });
+
   app.post("/internal/match-results", express.json(), (req, res) =>
     matchResultsHandler({ headers: req.headers, body: req.body }, res),
   );
+}
+
+/**
+ * Resolve the verified Clerk accountId (`sub`) from the `Authorization: Bearer`
+ * header via the SHARED `verifyClerk` wrapper (AUTH-03 — one token, two
+ * consumers). On a missing/invalid token, responds 401 and returns null so the
+ * caller short-circuits. The accountId is the verified subject, never body input.
+ */
+async function bearerAccountId(
+  req: { headers: Record<string, unknown> },
+  res: {
+    status: (code: number) => { end: () => void; json: (b: unknown) => void };
+  },
+): Promise<string | null> {
+  const auth = req.headers["authorization"];
+  const header = typeof auth === "string" ? auth : "";
+  const token = header.startsWith("Bearer ") ? header.slice(7).trim() : "";
+  if (!token) {
+    res.status(401).end();
+    return null;
+  }
+  try {
+    const { accountId } = await verifyClerk(token);
+    return accountId;
+  } catch {
+    res.status(401).end();
+    return null;
+  }
 }
