@@ -10,7 +10,11 @@ RUN corepack enable
 WORKDIR /app
 
 # --- deps layer: copy manifests first for layer caching; install from REPO ROOT ---
-COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+# `.pnpmfile.cjs` (Plan 05) MUST be copied alongside the lockfile: pnpm records a
+# `pnpmfileChecksum` in pnpm-lock.yaml, and `--frozen-lockfile` recomputes it from the
+# pnpmfile present in the build context. Omit the file and pnpm sees a different (no-pnpmfile)
+# config → ERR_PNPM_LOCKFILE_CONFIG_MISMATCH. (Same class as the tsconfig.base.json COPY below.)
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml .pnpmfile.cjs ./
 COPY packages/server/package.json packages/server/
 COPY packages/shared/package.json packages/shared/
 COPY packages/client/package.json packages/client/
