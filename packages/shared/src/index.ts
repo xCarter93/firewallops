@@ -45,3 +45,11 @@ export { resolveShot, blastDamage } from "./resolve.js";
 // authority and the client preview import this ONE source — no verbatim copy.
 export { SHOT_1, SHOT_2, TROJAN, LOADOUT, expandFork, BARREL_LEN, muzzleOffset } from "./loadout.js";
 export type { ShotId } from "./loadout.js";
+
+// Aim-window authority (Phase 5, plan 07 — AIM-01): the FROZEN standard window
+// (30°–70°) + the pure relative/absolute clamp + facing-flip helpers. The
+// client control clamp, the AimView gauge, and the authoritative server clamp
+// all import this ONE source — per-mech windows (v2 MECH-01) specialize the
+// constant without a sim-core change.
+export { AIM_WINDOW, aimWindowMid, clampRelativeAngle, flipAngleByFacing, clampAbsoluteAngle } from "./aimWindow.js";
+export type { AimWindow } from "./aimWindow.js";
