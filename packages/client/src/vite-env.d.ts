@@ -24,12 +24,20 @@
  *   URL `new Client()` uses): the Meta-API is plain HTTPS, the game server is WS.
  *   e.g. `https://<railway-host>`. Confirm the server's `CORS_ORIGINS` allows the
  *   client origin. Set in the client `.env` (DEV) and in Vercel (deploy).
+ * - VITE_DOM_HUD — selects the DOM HUD overlay (Phase 6 HUD migration). Default
+ *   ON: the consumer reads `import.meta.env.VITE_DOM_HUD !== "0"`, so the string
+ *   "0" is the ONLY off-switch (never test truthiness of the raw string — an
+ *   unset value, "", or any other string all mean ON). When ON, the networked
+ *   `new Hud(..., { domHud: true })` suppresses the migrated Phaser widgets so the
+ *   DOM overlay owns the HUD without a competing canvas draw; `VITE_DOM_HUD=0`
+ *   falls back to the legacy Phaser HUD.
  */
 interface ImportMetaEnv {
   readonly VITE_SERVER_URL?: string;
   readonly VITE_NETWORKED?: string;
   readonly VITE_CLERK_PUBLISHABLE_KEY?: string;
   readonly VITE_SERVER_HTTP_URL?: string;
+  readonly VITE_DOM_HUD?: string;
 }
 
 interface ImportMeta {

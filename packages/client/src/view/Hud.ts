@@ -191,10 +191,22 @@ export class Hud {
   // Armed-pulse phase accumulator (color/opacity only, no layout scale).
   private pulseT = 0;
 
+  /**
+   * When true, the DOM HUD overlay (Phase 6 migration) owns the HUD, so this
+   * Phaser Hud suppresses every migrated widget to avoid a double-draw. The
+   * objects are still CONSTRUCTED (so the legacy fallback path stays intact when
+   * the flag is off) — they are merely hidden and never redrawn per frame.
+   * flash()/flashText are deliberately exempt: the floating damage-number channel
+   * reuses them regardless of which HUD renders the bar. See 06-CONTEXT.md.
+   */
+  private readonly domHud: boolean;
+
   constructor(
     private readonly scene: Phaser.Scene,
     playerIds: string[],
+    opts?: { domHud?: boolean },
   ) {
+    this.domHud = opts?.domHud === true;
     const cam = scene.cameras.main;
     this.w = cam.width;
     this.h = cam.height;
@@ -295,6 +307,61 @@ export class Hud {
     );
 
     this.layout();
+
+    if (this.domHud) this.applyDomHudSuppression();
+  }
+
+  /**
+   * Hide every migrated widget so the DOM overlay can own the HUD without a
+   * competing Phaser render. Called once at the end of the constructor under the
+   * domHud flag. flashText is intentionally NOT hidden (the floating damage-number
+   * channel stays live), and the objects are only `.setVisible(false)` — never
+   * destroyed — so the legacy (flag-off) path is unaffected. The per-frame draw
+   * methods (update/updateNetworked/setCountdown/drawBarChrome) additionally
+   * early-return under domHud so a suppressed widget is never re-shown each frame.
+   */
+  private applyDomHudSuppression(): void {
+    const migrated: Phaser.GameObjects.GameObject[] = [
+      // Wind (top-center).
+      this.windLabel,
+      this.windArrow,
+      this.windNum,
+      // Bar chrome.
+      this.barG,
+      // Shot-select.
+      this.shotCaption,
+      this.chipG,
+      ...this.chipText,
+      // Active-player control (SS pips + MOVE).
+      this.pips,
+      this.moveCaption,
+      this.moveBar,
+      // Power.
+      this.powerCaption,
+      this.powerBar,
+      this.powerNum,
+      // Score-stub (dropped in the DOM overlay).
+      this.scoreCaption,
+      this.scoreValue,
+      // Turn list.
+      this.turnCaption,
+      this.turnG,
+      ...this.turnRows,
+      // Turn countdown.
+      this.countdownText,
+      // Pre-match intro.
+      this.introHeading,
+      this.introBody,
+      // Win banner.
+      this.banner,
+      this.bannerSub,
+    ];
+    for (const obj of migrated) {
+      // The array's common supertype is GameObject, which doesn't declare the
+      // Visible component; every concrete widget here implements setVisible.
+      (obj as unknown as Phaser.GameObjects.Components.Visible).setVisible(false);
+    }
+    // flashText stays untouched (visible-on-demand) — flash() keeps working.
   }
 
   /**
@@ -343,7 +410,8 @@ export class Hud {
     this.countdownText.setPosition(w / 2, WIND_NUM_Y + 30);
 
     // Bar chrome: full-width 96px rect + top divider, pinned to viewport bottom.
-    this.drawBarChrome();
+    // Skipped under domHud so the DOM overlay's bar is never under-drawn.
+    if (!this.domHud) this.drawBarChrome();
 
     const captionY = this.barTop + BAR_PAD; // zone captions sit on the top pad row
     const rowY = captionY + 20; // widget row below its caption
@@ -423,6 +491,8 @@ export class Hud {
     dtMs: number,
     power = 0,
   ): void {
+    // Under the DOM HUD the overlay owns every bar widget — never redraw here.
+    if (this.domHud) return;
     this.pulseT += dtMs / 1000;
 
     // --- Wind arrow + magnitude (top-center, unchanged) ---
@@ -465,6 +535,8 @@ export class Hud {
     turnRows: { label: string; isNext: boolean }[];
     dtMs: number;
   }): void {
+    // Under the DOM HUD the overlay owns every bar widget — never redraw here.
+    if (this.domHud) return;
     this.pulseT += args.dtMs / 1000;
 
     this.drawWindArrow(args.wind);
@@ -483,6 +555,8 @@ export class Hud {
    * top-center. Polished styling is Phase 6; clock skew (~RTT) is acceptable.
    */
   setCountdown(secondsRemaining: number): void {
+    // Under the DOM HUD the overlay renders the countdown — never re-show here.
+    if (this.domHud) return;
     const s = Math.max(0, Math.ceil(secondsRemaining));
     this.countdownText.setText(`TURN: ${s}s`).setVisible(true);
   }
