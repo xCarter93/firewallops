@@ -25,7 +25,17 @@ export type {
 } from "./types.js";
 
 // Runtime symbols (stubbed in plan 01; real impls land in plans 02/04).
-export { TerrainMask, quantizeCarve, encodeMaskRLE, decodeMaskRLE } from "./terrain.js";
+export {
+  TerrainMask,
+  quantizeCarve,
+  encodeMaskRLE,
+  decodeMaskRLE,
+  RLE_MAGIC_BYTES,
+  RLE_VERSION,
+  RLE_HEADER_BYTES,
+  RLE_MAX_RUNS,
+  RLE_MAX_ENCODED_BYTES,
+} from "./terrain.js";
 export { simulateTrajectory, powerToSpeed } from "./ballistics.js";
 export { DEFAULT_BEHAVIOR, getBehavior } from "./projectile.js";
 export { resolveShot, blastDamage } from "./resolve.js";

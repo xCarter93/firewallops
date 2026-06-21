@@ -178,16 +178,47 @@ const MAX_W = 2048;
 const MAX_H = 1408;
 
 /**
+ * RLE wire-format header constants (review M4 — no unnamed magic bytes).
+ *
+ * The header is self-validating across deployed builds: a reconnecting client
+ * (Phase 5) may be a DIFFERENT build than the server that produced the snapshot,
+ * so the bytes cross a version boundary. A magic + version prefix lets `decode`
+ * reject a cross-build/corrupt snapshot with the wrong magic or an unknown
+ * version BEFORE it allocates or fills a mask.
+ */
+export const RLE_MAGIC_BYTES = Uint8Array.of(0xf0, 0x05);
+export const RLE_VERSION = 1 as const;
+/** 2 magic + 1 version + 4 width + 4 height. */
+export const RLE_HEADER_BYTES = 11;
+/**
+ * The alternating-run count is bounded by the pixel count: there can never be
+ * more runs than there are cells in the largest legitimate mask.
+ */
+export const RLE_MAX_RUNS = MAX_W * MAX_H;
+/**
+ * The largest legitimate encoded buffer (review M4 encoded-size cap, required IN
+ * ADDITION to the run-count cap). Each LEB128 run is at most 5 bytes for a
+ * 32-bit count, so a buffer larger than this can never be a valid encoding — it
+ * is rejected BEFORE the decode loop runs, so a huge hostile buffer can never
+ * force excessive decode work.
+ */
+export const RLE_MAX_ENCODED_BYTES = RLE_HEADER_BYTES + RLE_MAX_RUNS * 5;
+
+/**
  * Run-length encode the flat collision mask into a self-describing byte buffer.
  *
  * NET-05 join snapshot: a mid-match joiner (or a Phase 5 reconnect) needs the
  * FULL current mask in one payload (carve-replay only covers steady-state). This
  * is the only serialize path off a `TerrainMask`.
  *
- * Wire format (little-endian, no external schema needed beyond these bytes):
- *   - bytes 0..3  : width  as LE uint32
- *   - bytes 4..7  : height as LE uint32
- *   - bytes 8..   : a sequence of LEB128 unsigned varint run lengths.
+ * Wire format (little-endian, no external schema needed beyond these bytes), an
+ * `RLE_HEADER_BYTES`-byte header:
+ *   - byte 0       : `RLE_MAGIC_BYTES[0]` (0xF0)
+ *   - byte 1       : `RLE_MAGIC_BYTES[1]` (0x05)
+ *   - byte 2       : `RLE_VERSION` as uint8
+ *   - bytes 3..6   : width  as LE uint32
+ *   - bytes 7..10  : height as LE uint32
+ *   - bytes 11..   : a sequence of LEB128 unsigned varint run lengths.
  *
  * The mask values are only ever 0 or 1, so runs alternate value 0,1,0,1,…. The
  * FIRST run is ALWAYS the count of leading 0 (air) bits — emit a zero-length
@@ -195,9 +226,10 @@ const MAX_H = 1408;
  * LEB128 (7 data bits/byte, high bit = continuation) is used so a run wider than
  * 255 (a full air row is `width` wide) is never truncated.
  *
- * v0 wire format has no magic/version byte; add one before any cross-version
- * snapshot in Phase 5 — the self-describing LE-dimension header already prevents
- * a stale-MAP decode, so a magic byte adds wire churn for no Phase 3 benefit.
+ * The leading magic + version make the payload self-validating across deployed
+ * builds: a Phase 5 reconnect snapshot from an incompatible wire layout is
+ * rejected by `decodeMaskRLE` (bad magic / unsupported version) rather than
+ * silently decoded into a wrong collision mask.
  *
  * Pure: no DOM, engine, network, or Node-only types — only Uint8Array,
  * DataView, and Math (all ES2022 built-ins under the shared tsconfig).
@@ -226,18 +258,21 @@ export function encodeMaskRLE(mask: TerrainMask): Uint8Array {
   // Push the final run. For an empty mask (length 0) the single run is 0.
   runs.push(run);
 
-  // Size the output exactly: 8-byte header + varint bytes for every run.
+  // Size the output exactly: RLE_HEADER_BYTES header + varint bytes per run.
   let varintBytes = 0;
   for (const r of runs) {
     varintBytes += varintByteLength(r);
   }
 
-  const out = new Uint8Array(8 + varintBytes);
+  const out = new Uint8Array(RLE_HEADER_BYTES + varintBytes);
   const view = new DataView(out.buffer);
-  view.setUint32(0, mask.width, true);
-  view.setUint32(4, mask.height, true);
+  out[0] = RLE_MAGIC_BYTES[0];
+  out[1] = RLE_MAGIC_BYTES[1];
+  out[2] = RLE_VERSION;
+  view.setUint32(3, mask.width, true);
+  view.setUint32(7, mask.height, true);
 
-  let offset = 8;
+  let offset = RLE_HEADER_BYTES;
   for (const r of runs) {
     offset = writeVarint(out, offset, r);
   }
@@ -278,14 +313,19 @@ function writeVarint(out: Uint8Array, offset: number, value: number): number {
  * a stale MAP size.
  *
  * HARDENED against corrupt/hostile snapshots (Agreed Concern #7 — Codex/Cursor
- * "decode DoS/corrupt-buffer"). Every guard runs BEFORE the matching allocation
- * or write, so a malformed buffer fails loudly rather than allocating huge
- * memory or producing a silently-wrong collision mask:
- *   - short header   → throw before reading the LE uint32s
+ * "decode DoS/corrupt-buffer"; review M4 magic+version+caps). Every guard runs
+ * BEFORE the matching allocation or write, so a malformed buffer fails loudly
+ * rather than allocating huge memory or producing a silently-wrong mask:
+ *   - encoded-size cap → throw BEFORE any read (oversize hostile buffer up front)
+ *   - short header   → throw before reading the magic / version / dimensions
+ *   - bad magic      → throw before reading dimensions (cross-build/corrupt)
+ *   - bad version    → throw before reading dimensions (unknown wire layout)
  *   - non-positive   → throw before allocating
  *   - over-bounds    → throw before allocating (MAX_W x MAX_H cap)
  *   - unterminated   → throw if a varint's continuation bit runs off the buffer
  *   - run overflow   → throw if a varint accumulates past width*height
+ *   - run-count cap  → throw if more than RLE_MAX_RUNS runs are decoded
+ *   - zero-length run→ throw on an INTERIOR zero-length run (only run 1 may be 0)
  *   - run past mask  → throw before the fill loop (no out-of-bounds writes)
  *   - underfill      → throw if the runs do not sum to width*height
  *
@@ -293,14 +333,29 @@ function writeVarint(out: Uint8Array, offset: number, value: number): number {
  * references only local integer constants. SIM-04 purity gate stays green.
  */
 export function decodeMaskRLE(bytes: Uint8Array): TerrainMask {
+  // --- Encoded-size cap FIRST (review M4): an oversize hostile buffer is
+  // rejected up front, before the magic/version/dimension reads, so it can never
+  // enter the decode loop. ---
+  if (bytes.length > RLE_MAX_ENCODED_BYTES) {
+    throw new Error("decodeMaskRLE: encoded buffer exceeds size cap");
+  }
+
   // --- Header guards (BEFORE any read of dimensions / any allocation) ---
-  if (bytes.length < 8) {
-    throw new Error("decodeMaskRLE: buffer shorter than 8-byte header");
+  if (bytes.length < RLE_HEADER_BYTES) {
+    throw new Error("decodeMaskRLE: buffer shorter than header");
+  }
+
+  if (bytes[0] !== RLE_MAGIC_BYTES[0] || bytes[1] !== RLE_MAGIC_BYTES[1]) {
+    throw new Error("decodeMaskRLE: bad magic");
+  }
+  const version = bytes[2];
+  if (version !== RLE_VERSION) {
+    throw new Error("decodeMaskRLE: unsupported RLE version " + version);
   }
 
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-  const width = view.getUint32(0, true);
-  const height = view.getUint32(4, true);
+  const width = view.getUint32(3, true);
+  const height = view.getUint32(7, true);
 
   if (width <= 0 || height <= 0) {
     throw new Error("decodeMaskRLE: non-positive dimensions");
@@ -313,9 +368,10 @@ export function decodeMaskRLE(bytes: Uint8Array): TerrainMask {
   // Allocate ONLY after the guards pass.
   const bits = new Uint8Array(total);
 
-  let readCursor = 8;
+  let readCursor = RLE_HEADER_BYTES;
   let writeCursor = 0;
   let value = 0; // first run is air (0), then alternate
+  let runCount = 0;
 
   while (readCursor < bytes.length) {
     // --- Decode one LEB128 varint with overflow + unterminated guards ---
@@ -333,6 +389,19 @@ export function decodeMaskRLE(bytes: Uint8Array): TerrainMask {
       }
       shift *= 0x80;
     } while ((byte & 0x80) !== 0);
+
+    // --- Run-count cap (review M4): the alternating-run count can never exceed
+    // the pixel count of the largest legitimate mask. ---
+    if (++runCount > RLE_MAX_RUNS) {
+      throw new Error("decodeMaskRLE: run count overflow");
+    }
+
+    // --- Zero-length-run rejection (review M4): only the FIRST run may
+    // legitimately be zero (the leading-solid case). An INTERIOR zero-length run
+    // is malformed and must fail loudly. ---
+    if (run === 0 && runCount > 1) {
+      throw new Error("decodeMaskRLE: zero-length run");
+    }
 
     // --- Bounds-check BEFORE filling (no out-of-bounds writes) ---
     if (writeCursor + run > total) {
