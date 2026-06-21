@@ -5,15 +5,15 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>FirewallOps</title>
     <!--
-      Web fonts (UI-SPEC "Tech/HUD Mono" pairing): Share Tech Mono + Fira Code,
-      with Orbitron reserved for the win banner. Zero-dependency CSS-link path
-      (RESEARCH A3) — BootScene awaits `document.fonts.ready` before handoff so
-      the first canvas frame renders in the correct family (no FOUT, Pitfall 5).
+      Web fonts (UI-SPEC Typography): Orbitron {700, 900} display/headings/CTA,
+      Fira Code {400, 500} body/labels, Share Tech Mono {400} numeric/data. The
+      shell DOM pages use all three; BootScene (plan 09, /play only) awaits
+      `document.fonts.ready` before the first canvas frame (no FOUT, Pitfall 5).
     -->
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
-      href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Fira+Code:wght@400;500&family=Orbitron:wght@700&display=swap"
+      href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Fira+Code:wght@400;500&family=Orbitron:wght@700;900&display=swap"
       rel="stylesheet"
     />
     <style>
@@ -21,25 +21,27 @@
       body {
         margin: 0;
         height: 100%;
-        /* The canvas fills the viewport (Scale.RESIZE); hide overflow so a
-           canvas descender gap / sub-pixel rounding can never make the page
-           scrollable and push the bottom HUD bar below the fold. */
+        /* The shell pages own their own scroll; the canvas (on /play only) fills
+           the viewport (Scale.RESIZE). overflow:hidden here prevents a canvas
+           descender gap / sub-pixel rounding from making the page scrollable and
+           pushing the bottom HUD bar below the fold while a match is mounted. The
+           DOM pages scroll inside #app when their content exceeds the viewport. */
         overflow: hidden;
         background: #0f172a;
       }
-      #game-container {
+      /* The shell mount root. The mini-router (src/shell/router.ts) swaps page
+         DOM into here. The play page (plan 09) injects its own #game-container
+         under #app on /play and removes it on leave — there is NO static canvas
+         container so the lobby/landing DOM and a live canvas never coexist. */
+      #app {
         width: 100vw;
         height: 100vh;
-      }
-      /* A canvas is display:inline by default and sits on the text baseline,
-         leaving a few px of descender space beneath it — block removes it. */
-      #game-container canvas {
-        display: block;
+        overflow: auto;
       }
     </style>
   </head>
   <body>
-    <div id="game-container"></div>
+    <div id="app"></div>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

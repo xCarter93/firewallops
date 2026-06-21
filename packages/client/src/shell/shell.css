@@ -1,0 +1,140 @@
+/*
+ * shell.css — the design-token stylesheet for the Firewallops web-app shell
+ * (Phase 5, Plan 06). All tokens are extracted verbatim from the founder's Claude
+ * Design (05-UI-SPEC.md §Color/Typography/Spacing). Imported by main.ts so the
+ * SOC command-center palette + typography load for every shell page (landing,
+ * lobby [plan 08], room [plan 08]). Phaser (/play, plan 09) keeps its own canvas
+ * styling; this governs the DOM chrome only.
+ */
+
+:root {
+  /* ---- Palette (UI-SPEC §Color) ---- */
+  --bg: #0f172a; /* dominant 60% — app field / page background */
+  --bg-deep: #0b1220; /* deepest panels / rails / footers */
+  --bg-deeper: #06141f; /* deepest accents (CTA text on cyan) */
+  --surface: #141e33; /* secondary 30% — cards / slot rows / tiles */
+  --surface-2: #1e293b; /* raised surface alt */
+  --line: #334155; /* borders / dividers */
+  --line-faint: rgba(148, 163, 184, 0.12); /* hairlines */
+  --accent: #22d3ee; /* cyan — the single functional accent */
+  --violet: #a855f7; /* secondary identity/depth accent */
+  --ready: #22c55e; /* success / ready / HP-good */
+  --warn: #f59e0b; /* warning / wind / HP-mid */
+  --danger: #ef4444; /* destructive / danger / red team / HP-critical */
+  --text: #f8fafc; /* primary copy / headings */
+  --text-2: #cbd5e1; /* body copy */
+  --muted: #94a3b8; /* labels / secondary meta */
+  --faint: #64748b; /* tertiary / disabled / captions */
+
+  /* ---- Spacing scale (UI-SPEC §Spacing — 8-point, multiples of 4) ---- */
+  --space-xs: 4px;
+  --space-sm: 8px;
+  --space-md: 16px;
+  --space-lg: 24px;
+  --space-xl: 32px;
+  --space-2xl: 48px;
+  --space-3xl: 64px;
+
+  /* ---- Radius scale (UI-SPEC §Spacing — border-radius set) ---- */
+  --radius-2: 2px; /* badges / pills */
+  --radius-3: 3px; /* buttons / inputs */
+  --radius-4: 4px; /* tiles / cards */
+  --radius-5: 5px; /* slot rows / panels */
+  --radius-6: 6px; /* screen frames / hero */
+
+  /* ---- Typography families (UI-SPEC §Typography) ---- */
+  --font-display: "Orbitron", sans-serif; /* headings / CTA — weights 700, 900 */
+  --font-body: "Fira Code", monospace; /* body / labels — weights 400, 500 */
+  --font-mono: "Share Tech Mono", monospace; /* numeric / data readouts — 400 */
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text-2);
+  font-family: var(--font-body);
+  font-size: 12px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+h1,
+h2,
+h3 {
+  font-family: var(--font-display);
+  color: var(--text);
+  line-height: 1.2;
+  margin: 0;
+}
+
+/* Numeric / data readouts use the mono family (the SOC aesthetic) — never prose. */
+.fw-num {
+  font-family: var(--font-mono);
+}
+
+/* Selection color (extracted from the design). */
+::selection {
+  background: var(--accent);
+  color: var(--bg);
+}
+
+/*
+ * Visible cyan focus ring on EVERY interactive element (UI-SPEC §Accessibility —
+ * hand-built chrome must show a 1px cyan focus ring on the slate field).
+ */
+a:focus-visible,
+button:focus-visible,
+input:focus-visible,
+[tabindex]:focus-visible,
+.fw-interactive:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* ---- Shared primitives the shell pages reuse ---- */
+
+.fw-btn-primary {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-sm);
+  padding: 15px 34px;
+  background: var(--accent);
+  color: var(--bg-deeper);
+  font-family: var(--font-display);
+  font-weight: 800;
+  font-size: 14px;
+  letter-spacing: 0.08em;
+  border: none;
+  border-radius: var(--radius-3);
+  cursor: pointer;
+  box-shadow: 0 0 32px -6px rgba(34, 211, 238, 0.6); /* cyan glow */
+}
+
+.fw-btn-ghost {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  padding: 15px 28px;
+  background: transparent;
+  color: var(--text);
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: 13px;
+  letter-spacing: 0.08em;
+  border: 1px solid rgba(148, 163, 184, 0.28);
+  border-radius: var(--radius-3);
+  cursor: pointer;
+}
+
+.fw-label {
+  font-family: var(--font-body);
+  font-weight: 500;
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
