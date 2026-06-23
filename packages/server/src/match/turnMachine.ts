@@ -273,3 +273,110 @@ export function shouldResolveFire(args: {
   }
   return true;
 }
+
+// ─────────────────────────── Phase 8: training decisions ───────────────────────────
+//
+// PURE training decision helpers (Phase 8, Plan 02). These are the SHARED source
+// of every training branch: the Room's thin adapter methods delegate to these,
+// AND `training.test.ts` exercises the EXACT SAME functions (P1.1 — no parallel
+// test copy). Both reviewers flagged that a test "modeling the branch the way the
+// room does" can stay green while the real branch is wrong — that is HOW the P0
+// `turnView` dropped-`passive` gap would have slipped through. Extracting the
+// decision into one pure function the Room calls closes that drift: the test and
+// production share one decision, not two copies. PURITY is preserved — these
+// import NOTHING from @colyseus and operate on plain records, not schema.
+
+/**
+ * The lobby-publish gate (TR-8): a training room is NEVER published to the lobby.
+ * The Room calls this instead of re-inlining `!isTraining`, so the unlisted
+ * invariant (one of the two highest-risk training invariants, previously locked
+ * only by grep) is exercised by `training.test.ts` via the SAME function.
+ */
+export function shouldPublishToLobby(isTraining: boolean): boolean {
+  return !isTraining;
+}
+
+/**
+ * The match-result write gate (TR-8 stats integrity): a training quit/end NEVER
+ * records a match result. Mirrors the existing `removeAndForfeit` abandon-write
+ * condition exactly (`wasInProgress && hasAccountId`) PLUS the training veto, so
+ * the Room can gate the abandon write on the SAME predicate the test asserts —
+ * a double-lock on the no-stats invariant.
+ */
+export function shouldRecordResult(
+  isTraining: boolean,
+  wasInProgress: boolean,
+  hasAccountId: boolean,
+): boolean {
+  return !isTraining && wasInProgress && hasAccountId;
+}
+
+/**
+ * The player-invincible HP write-back gate (TR-7). Returns TRUE if the resolve
+ * HP write-back SHOULD happen for this mech, FALSE if it must be SKIPPED. In
+ * training the firing player takes NO self-splash: the player's OWN mobile HP is
+ * never written down (FALSE for `mechId === activeSessionId`), but the dummy's HP
+ * IS written (TRUE), so the dummy still takes damage and can die. In a real match
+ * everyone's HP is written (TRUE). The Room's resolve loop and the `invincible`
+ * test call this exact predicate.
+ */
+export function applyTrainingHpWriteBack(
+  isTraining: boolean,
+  mechId: string,
+  activeSessionId: string,
+): boolean {
+  return !(isTraining && mechId === activeSessionId);
+}
+
+/**
+ * The respawn-not-end decision (TR-4): in training a dummy at HP<=0 is respawned
+ * (with fresh terrain) and the match CONTINUES — it NEVER ends. Returns TRUE when
+ * the dummy is dead (→ respawn), FALSE when alive (→ just continue). The Room's
+ * `afterResolve` training branch delegates here; the `respawn` test asserts the
+ * same boundary.
+ */
+export function shouldTrainingRespawn(dummyHp: number): boolean {
+  return dummyHp <= 0;
+}
+
+/**
+ * The manual-RESET-only player shot-state wipe (TR-5). MUTATES the passed record
+ * back to a clean turn: SS charge cleared, default shot re-selected, power/lock/
+ * delay zeroed, angle re-centered. A `Mobile` schema entry satisfies this
+ * structurally, so the Room's `resetPlayerShotState()` passes the human mobile
+ * straight in — the SAME function the test exercises on a plain record.
+ *
+ * CALL ONLY from the manual-RESET path. A kill-RESPAWN deliberately PRESERVES the
+ * player's earned `ssHitCharge` (the respawn helper touches only the dummy +
+ * terrain, never the player record), so do NOT call this from the respawn path.
+ */
+export function resetPlayerShotStateOn(rec: {
+  ssHitCharge: number;
+  selectedItemId: string;
+  power: number;
+  powerLocked: boolean;
+  accumulatedDelay: number;
+  angleDeg: number;
+}): void {
+  rec.ssHitCharge = 0;
+  rec.selectedItemId = "shot-1";
+  rec.power = 0;
+  rec.powerLocked = false;
+  rec.accumulatedDelay = 0;
+  rec.angleDeg = 45;
+}
+
+/**
+ * The start-with-1 gate (TR-1): a training room starts the instant the single
+ * human is seated — it BYPASSES the ready handshake (`shouldAutoStart`). Returns
+ * TRUE only for a training room with at least one human. A real match returns
+ * FALSE here (it must go through the ready/auto-start path instead). The Room's
+ * `onJoin` training branch is gated on this; the `start-with-1` test asserts the
+ * bypass against `shouldAutoStart`.
+ */
+export function shouldStartImmediately(
+  isTraining: boolean,
+  humanCount: number,
+): boolean {
+  return isTraining && humanCount >= 1;
+}

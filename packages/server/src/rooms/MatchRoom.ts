@@ -47,7 +47,7 @@ import {
   type MatchMode,
   resolveDwellMs,
 } from "../config.js";
-import { MAP, spawnLayout, surfaceY, settledY } from "../match/world.js";
+import { MAP, spawnLayout, surfaceY, settledY, randomDummyX } from "../match/world.js";
 import { runServerShot, type ServerMech } from "../match/resolve.js";
 import {
   advanceTurn,
@@ -59,6 +59,13 @@ import {
   forfeitOutcome,
   canFire,
   shouldResolveFire,
+  toTurnMobile,
+  shouldPublishToLobby,
+  shouldRecordResult,
+  applyTrainingHpWriteBack,
+  shouldTrainingRespawn,
+  resetPlayerShotStateOn,
+  shouldStartImmediately,
   type TurnMobile,
 } from "../match/turnMachine.js";
 import {
@@ -66,10 +73,12 @@ import {
   aimSchema,
   selectItemSchema,
   readySchema,
+  resetRangeSchema,
   type FireMessage,
   type AimMessage,
   type SelectItemMessage,
   type ReadyMessage,
+  type ResetRangeMessage,
 } from "../match/messageSchemas.js";
 import { recordMatchResult } from "../meta/results.js";
 import { verifyClerk } from "../auth/clerk.js";
@@ -95,6 +104,19 @@ export class MatchRoom extends Room<{ state: MatchState }> {
   private turnTimer?: ReturnType<MatchRoom["clock"]["setTimeout"]>;
 
   /**
+   * The pending PHASE-ADVANCE dwell handle (Phase 8, P1.2 / P2). The RESOLVE
+   * dwell (`afterResolve`) and the TURN_START dwell (`enterAiming`) were both
+   * fire-and-forget `setTimeout`s — so a RESET or training leave could not cancel
+   * a pending advance, and a stale `afterResolve`/`enterAiming` could run
+   * `advanceTurn()` on an all-passive set AFTER a rebuild ("no living mobile to
+   * advance to" throw). Only one of the two is ever pending at a time, so a single
+   * stored handle suffices (cleared before re-arming). `clearPendingTimers()`
+   * cancels both this and `turnTimer` so `onResetRange` / training `removeAndForfeit`
+   * can guarantee no stale callback fires post-reset/leave.
+   */
+  private resolveTimer?: ReturnType<MatchRoom["clock"]["setTimeout"]>;
+
+  /**
    * Graceful-drain flag (review H2). Set true by `onBeforeShutdown` on a
    * deploy/restart so the shutdown is observable (the broadcast notifies clients;
    * the flag records the state). Reconnection is Phase 5 — this is the Phase-4
@@ -110,6 +132,14 @@ export class MatchRoom extends Room<{ state: MatchState }> {
    */
   private mode: MatchMode = "1v1";
   private teamSize = 1;
+  /**
+   * Single-occupant training-mode flag (Phase 8). Derived SERVER-SIDE in onCreate
+   * from `mode === "training"` — NEVER read from client input (T-08-06), so a
+   * client can never assert invincibility/passivity/unlisted for itself. Every
+   * training branch (unlisted publish, dummy spawn, start-with-1, invincible
+   * write-back, respawn-not-end, resetRange, no-stats quit) is gated on this flag.
+   */
+  private isTraining = false;
   // NOTE: distinct from the base Room.roomName (the registered handler id "match").
   // This is the human-facing lobby label; do NOT name it `roomName` — shadowing the
   // base field as private breaks updateLobby(this)'s `Room` structural type.
@@ -165,6 +195,13 @@ export class MatchRoom extends Room<{ state: MatchState }> {
     unready: validate(readySchema, (client: Client, _payload: ReadyMessage) =>
       this.setReady(client.sessionId, false),
     ),
+    // Training-only range reset (Phase 8). Zod-gated by the strict-object schema
+    // (rejects spoofed keys — T-08-01); the handler ITSELF early-returns in a real
+    // match (`if (!this.isTraining) return;` — T-08-03), so it is inert outside
+    // training even on a leaked roomId.
+    resetRange: validate(resetRangeSchema, (_client: Client, _payload: ResetRangeMessage) =>
+      this.onResetRange(),
+    ),
   };
 
   async onCreate(options?: { name?: string; mode?: MatchMode }): Promise<void> {
@@ -179,8 +216,13 @@ export class MatchRoom extends Room<{ state: MatchState }> {
     // the onJoin overflow guard is the explicit reject on top of it.
     this.mode = options?.mode ?? "1v1";
     this.teamSize = teamSizeForMode(this.mode);
+    this.isTraining = this.mode === "training";
     this.lobbyName = options?.name ?? "ROOM";
-    this.maxClients = this.teamSize * 2;
+    // Training rooms are UNLISTED + hard-capped to ONE human seat. The dummy is a
+    // `mobiles` entry, NOT a client seat, so maxClients=1 leaves room for it AND
+    // hard-caps a 2nd join even on a leaked roomId (T-08-04). Competitive modes
+    // keep the teamSize*2 seat math.
+    this.maxClients = this.isTraining ? 1 : this.teamSize * 2;
 
     // Publish initial joinable metadata so the live lobby list shows this open
     // room (LOBBY-01/02). CRITICAL (Pitfall 1): setMetadata alone does NOT notify
@@ -195,7 +237,14 @@ export class MatchRoom extends Room<{ state: MatchState }> {
       locked: false,
       phase: "WAITING",
     });
-    updateLobby(this);
+    // Publish to the live lobby — UNLESS this is a training room (it is unlisted;
+    // setMetadata above stays harmless because setMetadata alone does NOT notify
+    // the lobby — only updateLobby does). Gated via the shared `shouldPublishToLobby`
+    // predicate so the unlisted invariant (T-08-04) is exercised by the same
+    // function the headless test asserts. NOTE (accepted): `setMetadata.maxPlayers`
+    // stays teamSize*2 for training — harmless while the room is never published;
+    // left as-is to avoid touching the metadata shape.
+    if (shouldPublishToLobby(this.isTraining)) updateLobby(this);
   }
 
   /**
@@ -208,6 +257,10 @@ export class MatchRoom extends Room<{ state: MatchState }> {
    * updateLobby(this).
    */
   private async refreshListing(): Promise<void> {
+    // Pitfall 3 — a training room must NEVER re-publish to the lobby from ANY
+    // caller (onJoin / setReady / removeAndForfeit all funnel here). Early-return
+    // keeps it unlisted for its whole lifetime (T-08-04).
+    if (this.isTraining) return;
     let readyCount = 0;
     this.state.mobiles.forEach((m) => {
       if (m.ready) readyCount++;
@@ -303,6 +356,21 @@ export class MatchRoom extends Room<{ state: MatchState }> {
     // bytes intact; client.send would msgpack-encode and corrupt them.
     client.sendBytes("terrainSnapshot", encodeMaskRLE(this.terrain));
 
+    // TRAINING start-with-1 (Phase 8, TR-1). The single human seat (+ accountId +
+    // terrain snapshot) is now set; spawn the server-owned dummy and start the
+    // turn IMMEDIATELY — NO ready handshake / `shouldAutoStart` path, the phase
+    // leaves WAITING the instant the human is seated. CRITICAL ORDERING (Pitfall 1):
+    // `spawnDummy()` seats the dummy SYNCHRONOUSLY BEFORE `startTurn()`, so
+    // `advanceTurn` sees BOTH mobiles and (dummy passive) returns the human. Gated
+    // on the shared `shouldStartImmediately` predicate (the SAME decision the
+    // `start-with-1` test asserts). Training skips lock()/refreshListing — maxClients
+    // caps the seat and the room is unlisted.
+    if (shouldStartImmediately(this.isTraining, this.state.mobiles.size)) {
+      this.spawnDummy();
+      this.startTurn();
+      return;
+    }
+
     // LOCK ON FULL (LOBBY-03): a full room is removed from matchmaking the moment
     // every seat is filled — even before it is all-ready. The match START is
     // gated separately on full && all-ready (setReady), NOT here.
@@ -312,6 +380,28 @@ export class MatchRoom extends Room<{ state: MatchState }> {
 
     // Re-publish the live metadata (players/readyCount/locked) to the lobby.
     void this.refreshListing();
+  }
+
+  /**
+   * Spawn the server-owned training dummy (Phase 8). A passive 100-HP target on
+   * team 1, seated at a VARIED x in the team-1 band (`randomDummyX`) on the mask
+   * surface. It is `passive=true` so `advanceTurn` NEVER selects it (the human is
+   * always active). NO `accountIds` entry is created for it — it has no client /
+   * accountId, so it can never reach `finalResultsPayload` or the abandon path.
+   * `sessionId === "dummy"` is the stable key used by respawn/reset.
+   */
+  private spawnDummy(): void {
+    const x = randomDummyX(this.terrain);
+    const dummy = new Mobile();
+    dummy.sessionId = "dummy";
+    dummy.team = 1;
+    dummy.facing = -1;
+    dummy.x = x;
+    dummy.y = surfaceY(this.terrain, Math.round(x));
+    dummy.hp = 100;
+    dummy.passive = true;
+    dummy.displayName = "DUMMY";
+    this.state.mobiles.set("dummy", dummy);
   }
 
   /**
@@ -418,6 +508,22 @@ export class MatchRoom extends Room<{ state: MatchState }> {
     const m = this.state.mobiles.get(sessionId);
     if (!m) return; // idempotency guard (H1) — already removed.
 
+    // TRAINING quit (Phase 8, P2 + Pitfall 5). A training leave writes NO result:
+    // (a) clear any pending dwell/turn timer FIRST so a post-leave
+    // `afterResolve`/`onTimeout` can NOT run `advanceTurn()` on an all-passive set
+    // ("no living mobile to advance to" throw — T-08-11); (b) strip the leaver's
+    // state; (c) RETURN before any `recordMatchResult`/`endMatch`/`endMatchDraw`, so
+    // a training quit fires no match-end and records no `abandon_loss` (T-08-05).
+    // The now-occupant-less room auto-disposes (Colyseus).
+    if (this.isTraining) {
+      this.clearPendingTimers();
+      this.state.mobiles.delete(sessionId);
+      this.accountIds.delete(sessionId);
+      this.aimBuckets.delete(sessionId);
+      this.itemBuckets.delete(sessionId);
+      return;
+    }
+
     const accountId = this.accountIds.get(sessionId);
     const wasInProgress =
       this.state.phase !== "RESULTS" && this.state.phase !== "WAITING";
@@ -442,7 +548,15 @@ export class MatchRoom extends Room<{ state: MatchState }> {
 
     // RECORD THE ABANDON-LOSS (Blocker 2) — only for an in-progress match with a
     // bound accountId. Explicit `abandon_loss` + granular `${roomId}:abandon:${accountId}`.
-    if (wasInProgress && accountId) {
+    // Gated on the SHARED `shouldRecordResult` predicate (P1.3 double-lock): even
+    // though training early-returns above, the abandon write is now gated on the
+    // SAME function the `stats invariants` test asserts, so the no-stats invariant
+    // is locked twice. (`accountId` is `string | undefined`; `!== undefined` is the
+    // `hasAccountId` arg.)
+    if (
+      shouldRecordResult(this.isTraining, wasInProgress, accountId !== undefined) &&
+      accountId !== undefined
+    ) {
       recordMatchResult({
         winnerTeam: outcome.kind === "winner" ? outcome.team : -1,
         resultId: `${this.roomId}:abandon:${accountId}`,
@@ -571,17 +685,22 @@ export class MatchRoom extends Room<{ state: MatchState }> {
 
   // ───────────────────────────── turn machine ─────────────────────────────
 
-  /** Snapshot the synced mobiles as the pure turn-machine view. */
+  /**
+   * Snapshot the synced mobiles as the pure turn-machine view.
+   *
+   * P0 (Phase 8, VERIFIED ship-blocker): this DELEGATES to the shared
+   * `toTurnMobile` mapping, which FORWARDS `passive`. The old inline push dropped
+   * `passive`, so the Plan-01 `advanceTurn` passive predicate read `undefined`
+   * (falsy) in production → the dummy (lowest delay) won the turn → the human was
+   * locked out behind the active-player gate (and with the training turn-timer
+   * disabled, never recovered) → SOFT-LOCK. Delegating to the SAME mapping the
+   * `turnView mapping` boundary test exercises guarantees production carries
+   * `passive` and the dummy can never win the turn.
+   */
   private turnView(): TurnMobile[] {
     const view: TurnMobile[] = [];
     this.state.mobiles.forEach((m) => {
-      view.push({
-        sessionId: m.sessionId,
-        team: m.team,
-        hp: m.hp,
-        accumulatedDelay: m.accumulatedDelay,
-        powerLocked: m.powerLocked,
-      });
+      view.push(toTurnMobile(m));
     });
     return view;
   }
@@ -613,15 +732,44 @@ export class MatchRoom extends Room<{ state: MatchState }> {
       );
     }
 
-    // Dwell on TURN_START so it is a distinct patch, then enter AIMING.
-    this.clock.setTimeout(() => this.enterAiming(), TURN_START_DWELL_MS);
+    // Dwell on TURN_START so it is a distinct patch, then enter AIMING. STORE the
+    // handle in `resolveTimer` (P1.2/P2) — clear any prior pending advance first so
+    // only one is ever live — so a RESET / training leave can cancel a pending
+    // TURN_START→AIMING transition.
+    this.resolveTimer?.clear();
+    this.resolveTimer = this.clock.setTimeout(
+      () => this.enterAiming(),
+      TURN_START_DWELL_MS,
+    );
   }
 
   private enterAiming(): void {
     this.state.phase = "AIMING";
-    this.state.turnEndsAt = this.clock.currentTime + TURN_MS;
+    // RESEARCH #6 — training disables the auto-fire turn timer (the player takes
+    // their time): set `turnEndsAt = 0` so the DOM HUD shows NO countdown, and arm
+    // the auto-fire timeout ONLY in a real match. The `turnTimer?.clear()` stays
+    // unconditional (a never-armed optional-chained timer is safe — Pitfall 4).
+    this.state.turnEndsAt = this.isTraining
+      ? 0
+      : this.clock.currentTime + TURN_MS;
     this.turnTimer?.clear();
-    this.turnTimer = this.clock.setTimeout(() => this.onTimeout(), TURN_MS);
+    if (!this.isTraining) {
+      this.turnTimer = this.clock.setTimeout(() => this.onTimeout(), TURN_MS);
+    }
+  }
+
+  /**
+   * Cancel ANY pending phase-advance (Phase 8, P1.2 / P2). Clears BOTH the
+   * auto-fire `turnTimer` AND the stored `resolveTimer` (the pending
+   * `afterResolve` RESOLVE dwell OR the pending `enterAiming` TURN_START dwell), so
+   * a RESET or a training leave guarantees no stale scheduled callback runs
+   * `startTurn()`/`afterResolve()`/`onTimeout()` AFTER state is rebuilt/torn down
+   * — preventing a double-advance and the "no living mobile to advance to" throw on
+   * an all-passive set (T-08-11). Optional-chained — safe when nothing is armed.
+   */
+  private clearPendingTimers(): void {
+    this.turnTimer?.clear();
+    this.resolveTimer?.clear();
   }
 
   /** Roll wind into [WIND_MIN, WIND_MAX] (mirrors MatchController.rollWind). */
@@ -684,6 +832,15 @@ export class MatchRoom extends Room<{ state: MatchState }> {
     // `damage` (a delta) + `carves` for ANIMATION ONLY; the client reconciles
     // to the schema hp after the animation, never double-applying the delta.
     for (const m of mechs) {
+      // TR-7 player-invincible: in training, SKIP writing the firing player's own
+      // resolved HP back into the schema (the schema is the authority, so the
+      // player never loses HP to self-splash). The dummy's HP IS written, so it
+      // still takes damage and can die. Delegated to the SHARED pure helper (P1.1)
+      // — the room and the `invincible` test call the SAME predicate, never a
+      // parallel inlined boolean.
+      if (!applyTrainingHpWriteBack(this.isTraining, m.id, active.sessionId)) {
+        continue;
+      }
       const mob = this.state.mobiles.get(m.id);
       if (mob) mob.hp = m.hp;
     }
@@ -709,14 +866,27 @@ export class MatchRoom extends Room<{ state: MatchState }> {
     // Delay queue: firing accumulates the def's tempo cost.
     active.accumulatedDelay += def.turnDelay;
 
-    // Authoritative outcome broadcast (NET-01).
-    this.broadcast("shotResult", result);
+    // Authoritative outcome broadcast (NET-01). S5b (TR-7 / T-08-10): the schema HP
+    // write-back above protects the player's HP, but the broadcast `shotResult`
+    // would STILL carry the player's self-damage and the client renders a floating
+    // number + shake for every `damage` entry (MatchScene.floatDamage). In training,
+    // filter the firing player's OWN id out of the broadcast `damage` so no
+    // self-damage FX renders — while keeping the dummy's damage numbers visible.
+    // Build a SHALLOW COPY for the broadcast only; `result` itself is reused for the
+    // dwell timing below (do NOT mutate it in place).
+    const payload = this.isTraining
+      ? { ...result, damage: result.damage.filter((d) => d.mechId !== active.sessionId) }
+      : result;
+    this.broadcast("shotResult", payload);
 
     // Hold RESOLVING for the shot's flight + a post-impact settle beat before
     // advancing the turn / ending the match — so the turn no longer flips the
     // instant the shot is fired (the turn timer is already cleared above). The
-    // dwell mirrors the client's flight timing from the SAME path length.
-    this.clock.setTimeout(
+    // dwell mirrors the client's flight timing from the SAME path length. STORE the
+    // handle in `resolveTimer` (P1.2/P2) so a RESET pressed mid-RESOLVING cancels
+    // this pending `afterResolve` instead of racing it.
+    this.resolveTimer?.clear();
+    this.resolveTimer = this.clock.setTimeout(
       () => this.afterResolve(),
       resolveDwellMs(result.path.length),
     );
@@ -730,6 +900,18 @@ export class MatchRoom extends Room<{ state: MatchState }> {
    * shotResult broadcast.
    */
   private afterResolve(): void {
+    // TR-4 respawn-not-end: training ALWAYS continues — it NEVER ends the match.
+    // If the dummy died (decision delegated to the shared `shouldTrainingRespawn`),
+    // respawn it with fresh terrain; either way re-enter a clean turn. The
+    // `checkWinTeam` path below stays the real-match path (checkWinTeam is left
+    // training-UNAWARE — the respawn branch lives HERE at the call site).
+    if (this.isTraining) {
+      const dummy = this.state.mobiles.get("dummy");
+      if (dummy && shouldTrainingRespawn(dummy.hp)) this.respawnDummyAndTerrain();
+      this.startTurn();
+      return;
+    }
+
     const outcome = checkWinTeam(this.turnView());
     if (outcome.kind === "winner") {
       this.endMatch(outcome.team);
@@ -738,6 +920,82 @@ export class MatchRoom extends Room<{ state: MatchState }> {
     } else {
       this.startTurn();
     }
+  }
+
+  /**
+   * Respawn the dead training dummy with fresh terrain (Phase 8, TR-4 kill path).
+   * Delete the dead dummy, rebuild+rebroadcast terrain (clears craters
+   * client-side — Pitfall 4 / A1), then `spawnDummy()` seats a fresh passive
+   * 100-HP dummy at a NEW varied x. Does NOT touch the player's shot state — a
+   * kill-respawn PRESERVES the player's earned `ssHitCharge` (only a manual RESET
+   * wipes it, via `resetPlayerShotState`).
+   */
+  private respawnDummyAndTerrain(): void {
+    this.state.mobiles.delete("dummy");
+    this.rebuildAndBroadcastTerrain();
+    this.spawnDummy();
+  }
+
+  /**
+   * Rebuild the authoritative terrain mask from MAP and re-send the snapshot
+   * (Phase 8). The EXACT `onCreate` rebuild + the snapshot rebroadcast in one
+   * place — the re-send is what clears craters client-side (A1: the client
+   * REPLACES the mask on a fresh snapshot).
+   */
+  private rebuildAndBroadcastTerrain(): void {
+    this.terrain = TerrainMask.fromMap(MAP);
+    this.rebroadcastTerrain();
+  }
+
+  /**
+   * Re-send the RLE terrain snapshot as RAW BYTES to every client (Phase 8,
+   * Pitfall 4). Same `sendBytes("terrainSnapshot", …)` byte path as
+   * onJoin/onReconnect (client.send would msgpack-corrupt it). A single client in
+   * training, but the loop keeps the path generic.
+   */
+  private rebroadcastTerrain(): void {
+    const bytes = encodeMaskRLE(this.terrain);
+    this.clients.forEach((c) => c.sendBytes("terrainSnapshot", bytes));
+  }
+
+  /**
+   * Wipe the human player's shot state on a manual RESET (Phase 8, TR-5). Finds
+   * the human mobile (the non-passive seat — `sessionId !== "dummy"`) and delegates
+   * to the SHARED pure `resetPlayerShotStateOn` (the SAME function the `reset` test
+   * exercises). Manual-RESET only — the kill-respawn path deliberately does NOT
+   * call this (it preserves earned ssHitCharge).
+   */
+  private resetPlayerShotState(): void {
+    let human: Mobile | undefined;
+    this.state.mobiles.forEach((m) => {
+      if (!m.passive && m.sessionId !== "dummy") human = m;
+    });
+    if (human) resetPlayerShotStateOn(human);
+  }
+
+  /**
+   * Training-only RANGE RESET (Phase 8, S7 / TR-5). Inert in a real match
+   * (T-08-03). Order matters:
+   *   1. Training gate — inert outside training.
+   *   2. CANCEL any pending phase-advance FIRST (P1.2): a RESET pressed during
+   *      RESOLVING/dwell would otherwise race the pending `afterResolve` (the
+   *      RESOLVE dwell is scheduled on every shot) — clearing it makes RESET
+   *      idempotent across AIMING/RESOLVING/TURN_START.
+   *   3. Rebuild+rebroadcast terrain, respawn the dummy at a new x, wipe the
+   *      player's shot state (incl. ssHitCharge). Do NOT roll wind here —
+   *      `startTurn` is the single wind owner (rolling here too would DOUBLE-roll).
+   *   4. `startTurn()` re-enters a clean turn: it rolls wind ONCE, picks the human
+   *      via the now-`passive`-aware turnView, and re-arms the dwell. The terrain
+   *      snapshot was rebroadcast in step 3 BEFORE startTurn so it lands.
+   */
+  private onResetRange(): void {
+    if (!this.isTraining) return;
+    this.clearPendingTimers();
+    this.rebuildAndBroadcastTerrain();
+    this.state.mobiles.delete("dummy");
+    this.spawnDummy();
+    this.resetPlayerShotState();
+    this.startTurn();
   }
 
   /**
