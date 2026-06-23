@@ -339,3 +339,16 @@ export function sendFire(
 export function sendSelectItem(room: Room, itemId: string): void {
   room.send("selectItem", { itemId });
 }
+
+/**
+ * Training-only RESET (TR-9/TR-10): ask the server to rebuild the range. The
+ * server's `onResetRange` rebuilds terrain/dummy/wind + the player's shot state
+ * and re-sends the terrain snapshot. The message is INERT in non-training rooms —
+ * the server gates it (`onResetRange` early-returns when `!isTraining`), so a
+ * spoofed send in a real match does nothing (Plan 02 / threat T-08-08). The
+ * message name `"resetRange"` and the empty `{}` payload MUST match the server's
+ * `resetRangeSchema` + `messages.resetRange` (Plan 02).
+ */
+export function sendResetRange(room: Room): void {
+  room.send("resetRange", {});
+}

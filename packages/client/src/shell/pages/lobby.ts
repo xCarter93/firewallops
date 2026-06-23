@@ -542,7 +542,27 @@ export function renderLobby(
     modeCard("⬢", "var(--violet-2)", "CUSTOM", "Build a room", null, () => openCreateForm()),
   );
   modeCards.appendChild(
-    modeCard("◎", "var(--warn)", "TRAINING", "Solo range", "Illustrative — training range is not yet wired.", null),
+    // TRAINING is the LIVE solo-range path — mirrors the DEPLOY ROOM confirm flow
+    // but with a fixed name + the "training" mode so the server spawns the passive
+    // dummy range (Plan 02). Routes through the single-owner matchSession (Blocker 3)
+    // → /room/:id, which auto-forwards to /play the instant the server flips phase
+    // out of WAITING (training starts immediately).
+    modeCard("◎", "var(--warn)", "TRAINING", "Solo range", null, () => {
+      void (async () => {
+        try {
+          const token = await getToken();
+          const room = await matchSession.create(
+            "TRAINING",
+            "training",
+            token ?? "",
+            inertHandlers,
+          );
+          go(`/room/${encodeURIComponent(room.roomId)}`);
+        } catch (e) {
+          console.error("[lobby] training create failed", e);
+        }
+      })();
+    }),
   );
 
   hero.append(heroCopy, modeCards);
