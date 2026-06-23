@@ -70,6 +70,28 @@ export interface SpawnSeat {
   team: number;
 }
 
+/**
+ * A varied integer x inside the team-1 (RIGHT) spawn band `[1148, 1848]` — the
+ * SAME band `spawnLayout`'s `bandFor(1)` uses (Phase 8 training dummy spawn). The
+ * dummy is team 1, so its randomized x must land in the right half; reusing the
+ * `1148`/`1848` band literals keeps it in lockstep with `spawnLayout`.
+ *
+ * `rng` defaults to `Math.random` so production calls are random; tests inject a
+ * deterministic rng (e.g. `() => 0.5`) to pin the band bounds. Pure geometry — NO
+ * Colyseus, NO DOM (preserves this module's purity discipline).
+ *
+ * The `mask` param is currently UNUSED in the body: the x is band-uniform and the
+ * CALLER (Plan 02 `spawnDummy`) settles the dummy's y via `surfaceY(mask, x)`, so
+ * any x in the band is reachable. It is kept for signature symmetry with the other
+ * world helpers and a future terrain-aware placement; y-settling is the caller's
+ * `surfaceY` responsibility (Codex LOW). Prefixed `_mask` to avoid an
+ * unused-parameter lint error.
+ */
+export function randomDummyX(_mask: TerrainMask, rng: () => number = Math.random): number {
+  // 1148 / 1848 mirror bandFor(1) above — the team-1 (right) band.
+  return Math.round(1148 + rng() * (1848 - 1148));
+}
+
 export function spawnLayout(mask: TerrainMask, teamSize: number): SpawnSeat[] {
   // Even spacing across each team's half. With teamSize === 1 we use the
   // band midpoint; with more, we distribute across the band inclusive of ends.

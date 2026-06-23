@@ -3,6 +3,7 @@ import {
   fireSchema,
   aimSchema,
   selectItemSchema,
+  resetRangeSchema,
 } from "../src/match/messageSchemas.js";
 
 /**
@@ -68,5 +69,15 @@ describe("messages: validate rejects out-of-range / malformed / unknown input (N
   it("selectItemSchema enforces the itemId allow-list", () => {
     expect(selectItemSchema.safeParse({ itemId: "trojan" }).success).toBe(true);
     expect(selectItemSchema.safeParse({ itemId: "nuke" }).success).toBe(false);
+  });
+
+  it("resetRangeSchema accepts an absent/empty payload AND rejects unknown keys (.strict().optional())", () => {
+    // Absent payload accepted — the payload-less client send (`room.send("resetRange")`).
+    expect(resetRangeSchema.safeParse(undefined).success).toBe(true);
+    // Empty object accepted.
+    expect(resetRangeSchema.safeParse({}).success).toBe(true);
+    // Unknown key REJECTED by `.strict()` (a non-strict z.object({}).optional()
+    // would STRIP it and pass — this assertion proves the fix).
+    expect(resetRangeSchema.safeParse({ foo: 1 }).success).toBe(false);
   });
 });

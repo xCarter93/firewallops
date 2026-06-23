@@ -62,6 +62,26 @@ export type SelectItemMessage = z.infer<typeof selectItemSchema>;
 export const readySchema = z.object({}).optional();
 export type ReadyMessage = z.infer<typeof readySchema>;
 
+/**
+ * `resetRange` (Phase 8, training only): the client requests a range reset
+ * (fresh terrain + re-spawned dummy) payload-less (`room.send("resetRange")`).
+ *
+ * `.strict()` REJECTS any unexpected payload key (e.g. `{ foo: 1 }`) at the Zod
+ * boundary rather than silently STRIPPING it (NET-07 discipline / Codex P2 — a
+ * bare `z.object({})` only strips unknown keys, it does NOT reject them). Then
+ * `.optional()` accepts the absent/`undefined` payload the payload-less client
+ * send produces. CONSTRUCTION ORDER MATTERS: `.strict()` applies to the inner
+ * object shape, `.optional()` makes the whole thing accept `undefined`, so
+ * `z.object({}).strict().optional()` composes strict-on-unknown WITH
+ * accept-undefined.
+ *
+ * The handler-level training gate (`if (!this.isTraining) return;`) lands in
+ * Plan 02, so this message is inert in real matches; the strict-object closes the
+ * spoofed-payload surface at the schema boundary (T-08-01).
+ */
+export const resetRangeSchema = z.object({}).strict().optional();
+export type ResetRangeMessage = z.infer<typeof resetRangeSchema>;
+
 /** Per-player explicit OUTCOME enum (Phase-5 Blocker 2 — NO boolean `won`). */
 export const OUTCOMES = ["win", "loss", "draw", "abandon_loss"] as const;
 
