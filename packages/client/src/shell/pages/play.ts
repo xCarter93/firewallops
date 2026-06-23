@@ -2,7 +2,11 @@ import type PhaserNamespace from "phaser";
 import type { Room } from "@colyseus/sdk";
 import { getToken } from "../auth.js";
 import { matchSession } from "../net/matchSession.js";
-import { provideMatchRoom, setShellMatchEndHook } from "../../net/room.js";
+import {
+  provideMatchRoom,
+  sendResetRange,
+  setShellMatchEndHook,
+} from "../../net/room.js";
 import type { NetHandlers } from "../../net/room.js";
 import { mountHudOverlay } from "../hud/hudOverlay.js";
 import { bindHudToRoom } from "../hud/hudBinding.js";
@@ -63,12 +67,34 @@ type HudOverlay = {
 interface SyncedMobile {
   sessionId: string;
   team: number;
+  /**
+   * The training-range dummy is flagged `passive` by the server (Plan 02). Its
+   * presence in `room.state.mobiles` is how the client detects a training room —
+   * a read-only presentation gate, NOT an authority decision (threat T-08-09).
+   */
+  passive?: boolean;
 }
 interface SyncedState {
   mobiles: {
     forEach(cb: (mobile: SyncedMobile, key: string) => void): void;
   };
 }
+
+/**
+ * Detect a TRAINING room from SYNCED state — the presence of a `passive` dummy
+ * mobile (Plan 02). This READS `room.state` only; it registers NO Colyseus
+ * listener (the listener-ownership invariant — MatchScene is the sole owner of
+ * onStateChange/onMessage). It is a presentation gate, never an authority call:
+ * the server gates `resetRange` itself (threat T-08-08).
+ */
+const isTrainingRoom = (room: Room): boolean => {
+  let found = false;
+  const state = room.state as unknown as SyncedState | undefined;
+  state?.mobiles.forEach((m) => {
+    if (m.passive === true) found = true;
+  });
+  return found;
+};
 
 /**
  * Render the play page into `root`. Returns a cleanup fn the router runs when
@@ -164,6 +190,128 @@ export function renderPlay(
         stopHudRaf = null;
         overlay?.destroy();
         overlay = null;
+      });
+    }
+
+    // ── TRAINING-ROOM CONTROLS (TR-9/TR-10/TR-11) ───────────────────────────
+    // Detect training client-side from SYNCED state (the presence of a `passive`
+    // dummy mobile, Plan 02) — NO router change, NO second seat. CRITICAL: this is
+    // a LISTENER-SAFE read. MatchScene is the SOLE owner of the room's
+    // onStateChange/onMessage (Blocker 3 / room.ts:184) — a second registration
+    // would CLOBBER the scene's handler — so we MIRROR bindHudToRoom: read
+    // room.state from an rAF tick, register NO Colyseus listener. The cluster
+    // mounts ONCE (idempotent via `trainingMounted`) when the dummy is synced;
+    // a frame-budgeted rAF re-check covers the first-frame race (the dummy patch
+    // may land a frame after /play mount) and self-terminates so a REAL match
+    // (no passive dummy) stops polling after the budget.
+    let trainingMounted = false;
+    const mountTrainingClusterIfNeeded = (): boolean => {
+      if (trainingMounted) return true;
+      if (!isTrainingRoom(room)) return false;
+      trainingMounted = true;
+
+      // On-brand TRAINING label — top-left, pointer-events:none, above the canvas.
+      const label = document.createElement("div");
+      label.textContent = "TRAINING";
+      Object.assign(label.style, {
+        position: "absolute",
+        top: "16px",
+        left: "16px",
+        zIndex: "60",
+        pointerEvents: "none",
+        fontFamily: "var(--font-display)",
+        fontWeight: "800",
+        fontSize: "13px",
+        letterSpacing: "0.16em",
+        color: "var(--warn)",
+        textShadow: "0 0 10px rgba(245,158,11,0.45)",
+      } satisfies Partial<CSSStyleDeclaration>);
+
+      // RESET + EXIT cluster — top-right, clear of the bottom HUD action bar.
+      const cluster = document.createElement("div");
+      Object.assign(cluster.style, {
+        position: "absolute",
+        top: "14px",
+        right: "16px",
+        zIndex: "60",
+        display: "flex",
+        gap: "10px",
+        alignItems: "center",
+      } satisfies Partial<CSSStyleDeclaration>);
+
+      const trainBtnStyle: Partial<CSSStyleDeclaration> = {
+        padding: "9px 16px",
+        background: "rgba(11,18,32,0.72)",
+        color: "var(--text)",
+        fontFamily: "var(--font-display)",
+        fontWeight: "700",
+        fontSize: "11px",
+        letterSpacing: "0.08em",
+        border: "1px solid rgba(95,200,245,0.3)",
+        clipPath: "polygon(8px 0,100% 0,100% calc(100% - 8px),calc(100% - 8px) 100%,0 100%,0 8px)",
+        cursor: "pointer",
+      };
+
+      const resetBtn = document.createElement("button");
+      resetBtn.type = "button";
+      resetBtn.textContent = "RESET RANGE (R)";
+      Object.assign(resetBtn.style, trainBtnStyle);
+      resetBtn.addEventListener("click", () => sendResetRange(room));
+
+      const exitBtn = document.createElement("button");
+      exitBtn.type = "button";
+      exitBtn.textContent = "EXIT (ESC)";
+      Object.assign(exitBtn.style, trainBtnStyle);
+      exitBtn.style.color = "var(--warn)";
+      exitBtn.style.borderColor = "rgba(245,158,11,0.45)";
+      exitBtn.addEventListener("click", () => returnToLobby());
+
+      cluster.append(resetBtn, exitBtn);
+      container.append(label, cluster);
+      track(() => {
+        label.remove();
+        cluster.remove();
+      });
+
+      // Training-only keybinds: R → reset, ESC → exit. Bound ONLY after a training
+      // room is confirmed, so a REAL match NEVER hijacks R/ESC. preventDefault on
+      // the handled keys stops browser defaults / leaks to other handlers. The
+      // remover is registered via track() so cleanup tears it down (Pitfall 7 —
+      // no leaked keydown, no post-leave resetRange).
+      const onKey = (e: KeyboardEvent): void => {
+        if (e.key === "r" || e.key === "R") {
+          e.preventDefault();
+          sendResetRange(room);
+        } else if (e.key === "Escape") {
+          e.preventDefault();
+          returnToLobby();
+        }
+      };
+      window.addEventListener("keydown", onKey);
+      track(() => window.removeEventListener("keydown", onKey));
+
+      return true;
+    };
+
+    // Common case: the dummy IS usually synced by /play mount (training
+    // startTurn() runs in onJoin before the phase flip that triggers the forward).
+    if (!mountTrainingClusterIfNeeded()) {
+      // First-frame race: re-check via an rAF poll that READS room.state each frame
+      // (NO Colyseus listener) until the passive dummy appears (mount + stop) OR the
+      // budget elapses (a REAL match never has a passive dummy — stop, never loop
+      // forever). The rAF cancel is registered via track() (Pitfall 7 — no leaked rAF).
+      let rafId = 0;
+      let frames = 0;
+      const POLL_MAX_FRAMES = 120; // ~2s at 60fps; the dummy lands within a few frames.
+      const poll = (): void => {
+        if (disposed) return;
+        if (mountTrainingClusterIfNeeded()) return;
+        if (++frames >= POLL_MAX_FRAMES) return; // give up: real match, no dummy.
+        rafId = requestAnimationFrame(poll);
+      };
+      rafId = requestAnimationFrame(poll);
+      track(() => {
+        if (rafId) cancelAnimationFrame(rafId);
       });
     }
 
