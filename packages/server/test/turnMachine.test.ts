@@ -6,6 +6,7 @@ import {
   seatsFull,
   timeoutOutcome,
   canFire,
+  toTurnMobile,
   type TurnMobile,
 } from "../src/match/turnMachine.js";
 import { FORFEIT_DELAY } from "../src/config.js";
@@ -86,6 +87,90 @@ describe("turn machine: delay queue + win + balance", () => {
     // 2v2: 4 total seats — full at 4, open at 3.
     expect(seatsFull(3, 2)).toBe(false);
     expect(seatsFull(4, 2)).toBe(true);
+  });
+});
+
+describe("turn machine: passive mobiles are excluded from the turn queue (Phase 8)", () => {
+  it("advanceTurn never returns a passive mobile, even with the lowest delay", () => {
+    // The passive dummy (delay 0) is excluded; the human (delay 10) acts.
+    const human = mobile({ sessionId: "human", accumulatedDelay: 10 });
+    const dummy = mobile({
+      sessionId: "dummy",
+      accumulatedDelay: 0,
+      passive: true,
+    });
+    expect(advanceTurn([human, dummy])).toBe("human");
+  });
+
+  it("training turn: the picked id is never the passive dummy across delay permutations", () => {
+    // No matter how the delays are arranged (dummy always lowest), the passive
+    // dummy never wins the turn — the human is always picked.
+    for (const dummyDelay of [0, 1, 5]) {
+      for (const humanDelay of [10, 20, 50]) {
+        const human = mobile({
+          sessionId: "human",
+          team: 0,
+          accumulatedDelay: humanDelay,
+        });
+        const dummy = mobile({
+          sessionId: "dummy",
+          team: 1,
+          accumulatedDelay: dummyDelay,
+          passive: true,
+        });
+        const picked = advanceTurn([dummy, human]);
+        expect(picked).toBe("human");
+        expect(picked).not.toBe("dummy");
+      }
+    }
+  });
+});
+
+describe("turnView mapping: a view built via toTurnMobile never picks the passive dummy (P0 boundary)", () => {
+  // Build fake `Mobile`-shaped records and map BOTH through `toTurnMobile` — the
+  // SAME mapping the room's `turnView()` delegates to. This FAILS if toTurnMobile
+  // drops `passive` (the exact production gap that would soft-lock the human once
+  // the dummy "won" the turn). A direct advanceTurn call with passive already set
+  // does NOT exercise this seam.
+  const humanRecord = {
+    sessionId: "human",
+    team: 0,
+    hp: 100,
+    accumulatedDelay: 30,
+    powerLocked: false,
+    passive: false,
+  };
+  const dummyRecord = {
+    sessionId: "dummy",
+    team: 1,
+    hp: 100,
+    accumulatedDelay: 0,
+    powerLocked: false,
+    passive: true,
+  };
+
+  it("toTurnMobile forwards passive so advanceTurn(view) === 'human'", () => {
+    const view: TurnMobile[] = [
+      toTurnMobile(humanRecord),
+      toTurnMobile(dummyRecord),
+    ];
+    // The mapping must carry passive through.
+    expect(view.find((m) => m.sessionId === "dummy")?.passive).toBe(true);
+    expect(advanceTurn(view)).toBe("human");
+    expect(advanceTurn(view)).not.toBe("dummy");
+  });
+
+  it("the mapped view never picks the dummy across delay permutations (dummy always lower)", () => {
+    for (const dummyDelay of [0, 1, 5]) {
+      for (const humanDelay of [10, 30, 99]) {
+        const view: TurnMobile[] = [
+          toTurnMobile({ ...dummyRecord, accumulatedDelay: dummyDelay }),
+          toTurnMobile({ ...humanRecord, accumulatedDelay: humanDelay }),
+        ];
+        expect(advanceTurn(view)).toBe("human");
+        expect(advanceTurn(view)).not.toBe("dummy");
+      }
+    }
   });
 });
 

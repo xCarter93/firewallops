@@ -85,16 +85,27 @@ export function resolveDwellMs(pathLength: number): number {
   return flight + RESOLVE_SETTLE_MS;
 }
 
-export type MatchMode = "1v1" | "2v2" | "4v4";
+export type MatchMode = "1v1" | "2v2" | "4v4" | "training";
 
 /**
  * Per-mode PER-TEAM size (total seats = `teamSizeForMode(mode) * 2`). The room
  * now derives its `teamSize` from its CREATE-OPTION mode (Plan 04, LOBBY-03) —
  * mode is a per-room concern, NOT a global constant. `MATCH_CONFIG` below is kept
  * only as a local-dev default.
+ *
+ * `"training"` is a SINGLE-HUMAN mode (Phase 8): teamSize 1 = one human seat, but
+ * the room ALSO hosts a server-spawned passive dummy mobile (team 1) that does
+ * NOT consume a human seat — the room hard-caps `maxClients = 1` in Plan 02 (it
+ * does NOT use the `teamSize * 2` seat math the competitive modes use).
  */
 export function teamSizeForMode(mode: MatchMode): number {
-  return mode === "4v4" ? 4 : mode === "2v2" ? 2 : 1;
+  return mode === "4v4"
+    ? 4
+    : mode === "2v2"
+      ? 2
+      : mode === "training"
+        ? 1
+        : 1;
 }
 
 /**

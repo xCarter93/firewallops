@@ -22,6 +22,43 @@ export interface TurnMobile {
   hp: number;
   accumulatedDelay: number;
   powerLocked: boolean;
+  /**
+   * Turn-EXCLUSION marker (Phase 8). When `true`, `advanceTurn` NEVER selects
+   * this mobile — the server-spawned training dummy carries `passive: true` so it
+   * cannot take a turn. OPTIONAL so existing callers/tests that omit it are
+   * unaffected: an undefined `passive` reads as not-passive.
+   */
+  passive?: boolean;
+}
+
+/**
+ * The SINGLE pure `Mobile` → `TurnMobile` mapping (Phase 8, P0 boundary seam).
+ *
+ * `MatchRoom.turnView()` (Plan 02 Task 1) delegates to THIS helper so the
+ * structural view that feeds `advanceTurn` ALWAYS carries `passive`. Before this
+ * helper, `turnView()` inlined the mapping and DROPPED `passive` — which would let
+ * the passive dummy win the turn in production and soft-lock the human behind the
+ * active-player gate. This helper MUST forward `passive`. The `turnView mapping`
+ * boundary test maps records through THIS function (the exact one the room uses),
+ * so it catches a dropped-`passive` regression that a direct `advanceTurn` call
+ * (with `passive` already set) would not.
+ */
+export function toTurnMobile(m: {
+  sessionId: string;
+  team: number;
+  hp: number;
+  accumulatedDelay: number;
+  powerLocked: boolean;
+  passive?: boolean;
+}): TurnMobile {
+  return {
+    sessionId: m.sessionId,
+    team: m.team,
+    hp: m.hp,
+    accumulatedDelay: m.accumulatedDelay,
+    powerLocked: m.powerLocked,
+    passive: m.passive,
+  };
 }
 
 /** The five server-driven phases (NET-03 state machine). */
@@ -49,6 +86,9 @@ export function advanceTurn(mobiles: TurnMobile[]): string {
   let next: TurnMobile | undefined;
   for (const m of mobiles) {
     if (m.hp <= 0) continue;
+    // Phase 8: a passive mobile (the server-spawned training dummy) is NEVER
+    // selected, even with the lowest accumulatedDelay — it must not take a turn.
+    if (m.passive) continue;
     if (next === undefined || m.accumulatedDelay < next.accumulatedDelay) {
       next = m;
     }

@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { resolvePort, resolveBindHost } from "../src/index.js";
 import { resolveRedisWiring } from "../src/redis.js";
+import { teamSizeForMode } from "../src/config.js";
 
 /**
  * Wave-0 config-resolution test (DEPLOY-02 / DEPLOY-04 / Codex concern #4).
@@ -80,5 +81,23 @@ describe("config: PORT / BIND_HOST / Redis-wiring resolution", () => {
     expect(wiring).not.toBeNull();
     // The factory must not mutate/append a family flag onto the URL it receives.
     expect(url).not.toContain("family");
+  });
+});
+
+/**
+ * Per-mode team-size lock (Phase 8, TR-2). `teamSizeForMode` is the single source
+ * of the per-team seat count; the `"training"` mode adds a single-human (teamSize
+ * 1) mode. Re-asserting the competitive modes locks the MatchMode union change so
+ * a future edit can't silently drift one of them.
+ */
+describe("teamSizeForMode", () => {
+  it('"training" is a single-human mode → teamSize 1', () => {
+    expect(teamSizeForMode("training")).toBe(1);
+  });
+
+  it("competitive modes are unchanged (1v1→1, 2v2→2, 4v4→4)", () => {
+    expect(teamSizeForMode("1v1")).toBe(1);
+    expect(teamSizeForMode("2v2")).toBe(2);
+    expect(teamSizeForMode("4v4")).toBe(4);
   });
 });

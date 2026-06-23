@@ -72,6 +72,18 @@ export class Mobile extends Schema {
    */
   @type("boolean") ready = false;
   /**
+   * Turn-EXCLUSION marker for a server-spawned, non-client target (the Phase 8
+   * training dummy). When `true`, this mobile is NEVER selected by the delay-queue
+   * turn order (`advanceTurn` skips it) so the dummy never "takes a turn" and
+   * soft-locks the human behind the active-player gate. ALWAYS `false` for a human
+   * seat — `passive` is set SERVER-SIDE ONLY (Plan 02 `spawnDummy`); it is never
+   * read from client input, so a client cannot assert passivity for itself
+   * (T-08-02). Matches the existing `@type("boolean")` decorator shape so it
+   * compiles under `experimentalDecorators` (boot-sensitive — typecheck does NOT
+   * catch a decorator boot crash; the boot-smoke gate does).
+   */
+  @type("boolean") passive = false;
+  /**
    * PUBLIC display handle (Blocker 1) — the name shown to OTHER players (turn
    * list + nameplate), loaded server-side from `accounts.display_name` in
    * `onAuth`. This is the ONLY identity field that crosses the wire. The Clerk

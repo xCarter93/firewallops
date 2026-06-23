@@ -37,6 +37,14 @@ describe("room capacity", () => {
     expect(seatsFull(7, 4)).toBe(false);
   });
 
+  it("training: single human seat — teamSize 1, maxClients hard-capped to 1 (not teamSize*2)", () => {
+    // teamSize is 1 (one human seat). NOTE: training caps occupancy via
+    // `maxClients = 1` set on the Room (Plan 02), NOT via `seatsFull` (which would
+    // compute teamSize*2 = 2 — that's the dummy slot, not a second human). We lock
+    // only the teamSize here; the room-level maxClients cap is asserted in Plan 02.
+    expect(teamSizeForMode("training")).toBe(1);
+  });
+
   it("full-but-not-all-ready: room is full (locked, admits no client) yet does NOT auto-start", () => {
     // Full (lock-on-full applies — the room admits no further client)…
     expect(seatsFull(2, 1)).toBe(true);
