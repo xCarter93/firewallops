@@ -602,6 +602,11 @@ export class MatchScene extends Phaser.Scene {
    * is blocked through the animation regardless of the synced phase.
    */
   animateShot(result: ShotResult): void {
+    // A shotResult broadcast arriving after teardown would build a ProjectileView
+    // against a destroyed scene (`this.add` is null → "Cannot read properties of
+    // null (reading 'add')"). The connection outlives the scene (Blocker 3), so
+    // ignore late shots — same guard as syncFromState/onMatchEnded.
+    if (this.disposed) return;
     this.isAnimatingShot = true;
     this.phase = "RESOLVING";
 
@@ -612,6 +617,10 @@ export class MatchScene extends Phaser.Scene {
     cam.startFollow(projectile.sprite, false, FOLLOW_LERP, FOLLOW_LERP);
 
     projectile.animateAlong(result.path, () => {
+      // The scene can be torn down DURING the projectile flight (an idle WS drop +
+      // reconnect remount mid-shot). The land callback touches terrain/fx/views, so
+      // bail if the scene is gone rather than draw into destroyed Phaser objects.
+      if (this.disposed) return;
       cam.stopFollow();
 
       const impact = result.impact ?? result.path[result.path.length - 1] ?? null;
@@ -704,6 +713,10 @@ export class MatchScene extends Phaser.Scene {
    * mid-animation is QUEUED (applied on land) so it never races an in-flight shot.
    */
   private rebuildTerrain(mask: TerrainMask): void {
+    // A terrainSnapshot can land after teardown (training rebroadcasts terrain on
+    // every reset/respawn, and a reconnect re-sends it). Destroying/rebuilding the
+    // TerrainView on a torn-down scene throws — ignore it (Blocker 3).
+    if (this.disposed) return;
     if (this.isAnimatingShot) {
       this.pendingTerrain = mask;
       return;

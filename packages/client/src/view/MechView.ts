@@ -71,6 +71,14 @@ export class MechView {
   private readonly badgeText: Phaser.GameObjects.Text;
   private disconnected = false;
 
+  // Set in destroy() so a LATE caller that touches this view after its Phaser
+  // objects are gone is a safe no-op instead of a "Cannot read properties of null
+  // (reading 'drawImage')" throw. Three races reach a destroyed view: a running
+  // settle-tween whose onUpdate closure still holds the view (applySettleFromState),
+  // an M6 stale-view removal that drops the view while a patch is mid-flight, and a
+  // reconnect remount. Mirrors the scene-level `disposed` guard, one level down.
+  private destroyed = false;
+
   constructor(
     private readonly scene: Phaser.Scene,
     x: number,
@@ -120,6 +128,7 @@ export class MechView {
    * critical-red below 25%; number always shown (color is not the only signal).
    */
   setHp(hp: number): void {
+    if (this.destroyed) return;
     this.hp = hp;
     this.updateHpLayout();
   }
@@ -135,6 +144,7 @@ export class MechView {
    * subtraction (`y - MECH_BODY_H / 2 - 18`). No second negation.
    */
   private updateHpLayout(): void {
+    if (this.destroyed) return;
     const x = this.body.x;
     const y = this.body.y;
     const barLeft = x - HP_BAR_W / 2; // centered on the 64px width over the mech
@@ -199,6 +209,7 @@ export class MechView {
    * one immediate re-layout so it appears in the right place at once.
    */
   setConnected(connected: boolean): void {
+    if (this.destroyed) return;
     this.disconnected = !connected;
     const alpha = connected ? 1 : DISCONNECTED_ALPHA;
     this.body.setAlpha(alpha);
@@ -232,11 +243,13 @@ export class MechView {
    * (e.g. absolute 150°) points the barrel up-and-left, matching the arc.
    */
   setBarrelAngle(absoluteAngleDeg: number): void {
+    if (this.destroyed) return;
     this.barrel.setRotation(Phaser.Math.DegToRad(-absoluteAngleDeg));
   }
 
   /** Flip the chassis to face left (-1) or right (+1) — visual cue only. */
   setFacing(facing: 1 | -1): void {
+    if (this.destroyed) return;
     this.body.setScale(facing, 1);
   }
 
@@ -247,12 +260,14 @@ export class MechView {
    * HP widget remain the primary signals (no color-only state).
    */
   setTeamColor(team: number): void {
+    if (this.destroyed) return;
     const color = team === 0 ? TEAM_A : team === 1 ? TEAM_B : TEAM_DEFAULT;
     this.body.setFillStyle(color);
   }
 
   /** Toggle the cyan "you control this" outline (UI-SPEC reserved cyan #1). */
   setActive(active: boolean): void {
+    if (this.destroyed) return;
     if (active) {
       this.body.setStrokeStyle(2, 0x22d3ee);
     } else {
@@ -262,6 +277,7 @@ export class MechView {
 
   /** Move the whole mech (body + barrel pivot + floating HP) — used when walking. */
   setPosition(x: number, y: number): void {
+    if (this.destroyed) return;
     this.body.setPosition(x, y);
     this.barrel.setPosition(x, y);
     // Re-anchor the floating HP via the SAME helper so it tracks the mech (walk
@@ -269,8 +285,11 @@ export class MechView {
     this.updateHpLayout();
   }
 
-  /** Tear down all graphics (used on rematch rebuild). */
+  /** Tear down all graphics (used on rematch rebuild). Idempotent + flips the
+   * `destroyed` flag so any late mutator call is a safe no-op. */
   destroy(): void {
+    if (this.destroyed) return;
+    this.destroyed = true;
     this.body.destroy();
     this.barrel.destroy();
     this.hpBar.destroy();
