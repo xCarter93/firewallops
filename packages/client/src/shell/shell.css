@@ -142,3 +142,275 @@ input:focus-visible,
   text-transform: uppercase;
   color: var(--muted);
 }
+
+/* ════════════════════════════════════════════════════════════════════════════
+ *  MOTION SYSTEM (Phase 6 interactivity pass)
+ *
+ *  A centralized animation layer for the DOM shell pages (landing / lobby / room /
+ *  overlays), keyed off the `fw-*` class names the pages already set. Goals, per the
+ *  UI-UX animation guidelines: subtle, transform/opacity-only, 150–300ms micro-
+ *  interactions, ease-out, one or two key moves per view — and fully disabled under
+ *  prefers-reduced-motion (the guard at the bottom of this block).
+ *
+ *  Continuous motion is reserved for genuinely-LIVE indicators (`.fw-live-dot` —
+ *  the green online / ready / live pips), never decoration.
+ * ════════════════════════════════════════════════════════════════════════════ */
+
+@keyframes fw-fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes fw-fade-up {
+  from {
+    opacity: 0;
+    transform: translateY(14px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes fw-pop-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px) scale(0.97);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+/* Toast keeps its inline translateX(-50%) centering across the whole animation. */
+@keyframes fw-toast-in {
+  from {
+    opacity: 0;
+    transform: translateX(-50%) translateY(-8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(-50%) translateY(0);
+  }
+}
+
+/* Gentle "breathing" for live indicators (online / ready / live dots). */
+@keyframes fw-live-pulse {
+  0%,
+  100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+  50% {
+    transform: scale(0.78);
+    opacity: 0.55;
+  }
+}
+
+/* ---- page-mount entrances (one soft move per surface) ---- */
+
+.fw-landing-content {
+  animation: fw-fade-in 0.4s ease-out both;
+}
+
+.fw-landing-navwrap {
+  animation: fw-fade-up 0.5s ease-out both;
+}
+
+/* Hero copy cascades in above the fold (no scroll trigger needed). */
+.fw-hero-left > * {
+  animation: fw-fade-up 0.55s ease-out both;
+}
+.fw-hero-left > *:nth-child(1) {
+  animation-delay: 0.05s;
+}
+.fw-hero-left > *:nth-child(2) {
+  animation-delay: 0.12s;
+}
+.fw-hero-left > *:nth-child(3) {
+  animation-delay: 0.19s;
+}
+.fw-hero-left > *:nth-child(4) {
+  animation-delay: 0.26s;
+}
+.fw-hero-left > *:nth-child(5) {
+  animation-delay: 0.33s;
+}
+.fw-hero-visual {
+  animation: fw-fade-in 0.7s ease-out 0.15s both;
+}
+
+.fw-lobby,
+.fw-room {
+  animation: fw-fade-in 0.4s ease-out both;
+}
+.fw-hub-hero {
+  animation: fw-fade-up 0.5s ease-out 0.06s both;
+}
+
+/* ---- scroll-revealed groups (landing card grids) ---- */
+/* Children stay hidden until JS (motion.ts) adds `.fw-in` as the group scrolls into
+ * view, then cascade. Opacity-only so the cards' transform stays free for hover. */
+
+.fw-reveal-group > * {
+  opacity: 0;
+}
+.fw-reveal-group.fw-in > * {
+  animation: fw-fade-in 0.5s ease-out both;
+}
+.fw-reveal-group.fw-in > *:nth-child(1) {
+  animation-delay: 0.04s;
+}
+.fw-reveal-group.fw-in > *:nth-child(2) {
+  animation-delay: 0.1s;
+}
+.fw-reveal-group.fw-in > *:nth-child(3) {
+  animation-delay: 0.16s;
+}
+.fw-reveal-group.fw-in > *:nth-child(4) {
+  animation-delay: 0.22s;
+}
+.fw-reveal-group.fw-in > *:nth-child(5) {
+  animation-delay: 0.28s;
+}
+.fw-reveal-group.fw-in > *:nth-child(6) {
+  animation-delay: 0.34s;
+}
+.fw-reveal-group.fw-in > *:nth-child(n + 7) {
+  animation-delay: 0.4s;
+}
+
+/* ---- button hover / press micro-interactions ---- */
+
+.fw-btn-primary,
+.fw-btn-ghost,
+.fw-playfree,
+.fw-signin,
+.fw-hero-watch,
+.fw-footer-cta,
+.fw-mode-cta,
+.fw-hub-create,
+.fw-room-back,
+.fw-room-ready,
+.fw-room-join {
+  transition: transform 0.16s ease-out, filter 0.16s ease-out,
+    box-shadow 0.16s ease-out;
+}
+
+/* Filled cyan CTAs — lift + brighten (inline glow stays; brightness lifts it). */
+.fw-btn-primary:hover,
+.fw-playfree:hover,
+.fw-footer-cta:hover {
+  transform: translateY(-1px);
+  filter: brightness(1.08) saturate(1.04);
+}
+
+/* Outline / text actions — lift + a cyan halo. */
+.fw-btn-ghost:hover,
+.fw-hero-watch:hover,
+.fw-mode-cta:hover,
+.fw-hub-create:hover,
+.fw-signin:hover,
+.fw-room-join:not([disabled]):hover,
+.fw-room-ready:not([disabled]):hover {
+  transform: translateY(-1px);
+  box-shadow: 0 0 18px -4px var(--accent);
+  filter: brightness(1.1);
+}
+
+.fw-btn-primary:active,
+.fw-btn-ghost:active,
+.fw-playfree:active,
+.fw-footer-cta:active,
+.fw-hero-watch:active,
+.fw-mode-cta:active,
+.fw-hub-create:active,
+.fw-signin:active,
+.fw-room-join:not([disabled]):active,
+.fw-room-ready:not([disabled]):active {
+  transform: translateY(0) scale(0.985);
+  filter: brightness(0.97);
+}
+
+/* Back chevron — slide toward where it takes you. */
+.fw-room-back:hover {
+  transform: translateX(-2px);
+  filter: brightness(1.5);
+}
+
+/* ---- card hover (lift + cyan glow) ---- */
+/* Stable mount cards (reveal groups) animate opacity on entrance, so transform is
+ * free here for a snappy hover lift. Room rows are rebuilt per lobby patch, so they
+ * get hover only (no entrance) to avoid re-firing on every push. */
+
+.fw-reveal-group > *,
+.fw-hub-modecards > *,
+.fw-room-row {
+  transition: transform 0.18s ease-out, box-shadow 0.18s ease-out,
+    filter 0.18s ease-out;
+}
+.fw-reveal-group > *:hover,
+.fw-hub-modecards > *:hover,
+.fw-room-row:hover {
+  transform: translateY(-3px);
+  box-shadow: 0 10px 30px -12px rgba(34, 211, 238, 0.45);
+  filter: brightness(1.05);
+}
+
+/* FAQ summary question brightens toward the accent on hover. */
+.fw-faq-list summary {
+  transition: color 0.15s ease-out;
+}
+.fw-faq-list summary:hover {
+  color: var(--accent);
+}
+
+/* ---- sidebar nav items (lobby) — nudge + brighten ---- */
+
+.fw-hub-nav-item {
+  transition: transform 0.16s ease-out, filter 0.16s ease-out;
+}
+.fw-hub-nav-item:hover {
+  transform: translateX(3px);
+  filter: brightness(1.25);
+}
+
+/* ---- live indicators (online / ready / live pips) ---- */
+
+.fw-live-dot {
+  animation: fw-live-pulse 2.4s ease-in-out infinite;
+}
+
+/* ---- overlays / modals / toasts ---- */
+
+.fw-overlay-backdrop {
+  animation: fw-fade-in 0.18s ease-out both;
+}
+.fw-overlay-card {
+  animation: fw-pop-in 0.22s ease-out both;
+}
+.fw-toast {
+  animation: fw-toast-in 0.3s ease-out both;
+}
+
+/* ════════════════════════════════════════════════════════════════════════════
+ *  REDUCED MOTION (accessibility — High). Neutralize all of the above: animations
+ *  jump to their end state (content stays visible), infinite pulses stop, and
+ *  transitions become instant — WITHOUT overriding transform, so the toast keeps
+ *  its translateX(-50%) centering.
+ * ════════════════════════════════════════════════════════════════════════════ */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}

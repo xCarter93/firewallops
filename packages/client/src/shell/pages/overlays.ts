@@ -33,6 +33,7 @@ export const RECONNECT_WINDOW_SECONDS = 30;
 /** A full-bleed dimmed backdrop that captures clicks (modal). */
 function backdrop(): HTMLDivElement {
   const bd = document.createElement("div");
+  bd.className = "fw-overlay-backdrop";
   Object.assign(bd.style, {
     position: "fixed",
     inset: "0",
@@ -51,6 +52,7 @@ function backdrop(): HTMLDivElement {
 /** A centered SOC card (the modal body). */
 function card(): HTMLDivElement {
   const c = document.createElement("div");
+  c.className = "fw-overlay-card";
   Object.assign(c.style, {
     width: "min(440px, 100%)",
     background: "var(--surface)",
@@ -98,6 +100,7 @@ function body(text: string): HTMLParagraphElement {
 function primaryButton(label: string): HTMLButtonElement {
   const b = document.createElement("button");
   b.type = "button";
+  b.className = "fw-btn-primary"; // pick up the shared hover/press micro-interaction.
   b.textContent = label;
   Object.assign(b.style, {
     marginTop: "var(--space-sm)",
@@ -349,6 +352,7 @@ export function showReconnecting(
 /** Show a brief `LINK RESTORED` toast (auto-dismisses). */
 export function showLinkRestored(durationMs = 2200): () => void {
   const toast = document.createElement("div");
+  toast.className = "fw-toast";
   Object.assign(toast.style, {
     position: "fixed",
     top: "var(--space-lg)",

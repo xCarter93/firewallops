@@ -244,6 +244,7 @@ export function renderRoom(
     gap: "7px",
   } satisfies Partial<CSSStyleDeclaration>);
   const agentsPip = document.createElement("span");
+  agentsPip.className = "fw-live-dot"; // live "online" pip — gentle pulse.
   Object.assign(agentsPip.style, {
     width: "6px",
     height: "6px",
@@ -915,6 +916,8 @@ function filledSlot(
   } satisfies Partial<CSSStyleDeclaration>);
 
   const pip = document.createElement("span");
+  // A READY (green) pip is "live" — gentle pulse; NOT-READY (red) stays static.
+  if (m.ready) pip.className = "fw-live-dot";
   Object.assign(pip.style, {
     width: "7px",
     height: "7px",

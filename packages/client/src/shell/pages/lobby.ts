@@ -1218,8 +1218,9 @@ function squadRow(
     `<div style="position:relative"><div style="width:34px;height:34px;` +
     `clip-path:polygon(25% 0,75% 0,100% 50%,75% 100%,25% 100%,0 50%);` +
     `background:linear-gradient(135deg,#334155,#1e293b)"></div>` +
-    `<span style="position:absolute;bottom:-1px;right:-1px;width:9px;height:9px;` +
-    `background:${dot};border-radius:50%;border:2px solid #0d1626"></span></div>` +
+    `<span${active ? ' class="fw-live-dot"' : ""} style="position:absolute;` +
+    `bottom:-1px;right:-1px;width:9px;height:9px;background:${dot};` +
+    `border-radius:50%;border:2px solid #0d1626"></span></div>` +
     `<div style="flex:1;min-width:0"><div style="font-size:12px;color:var(--text);` +
     `overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${name}</div>` +
     `<div style="font-family:${FONT.mono};font-size:9px;color:${statusColor}">${status}</div></div></div>`
@@ -1273,6 +1274,7 @@ function renderEmptyState(onCreate: () => void): HTMLElement {
 /** A full-bleed modal overlay (slate scrim). */
 function modalOverlay(): HTMLDivElement {
   const overlay = document.createElement("div");
+  overlay.className = "fw-overlay-backdrop";
   Object.assign(overlay.style, {
     position: "fixed",
     inset: "0",
@@ -1289,6 +1291,7 @@ function modalOverlay(): HTMLDivElement {
 /** A centered modal card on the field (chamfered Meshed frame). */
 function modalCard(): HTMLDivElement {
   const card = document.createElement("div");
+  card.className = "fw-overlay-card";
   Object.assign(card.style, {
     width: "420px",
     maxWidth: "100%",

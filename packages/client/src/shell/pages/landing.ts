@@ -1,5 +1,6 @@
 import { isSignedIn, openSignIn, RETURN_TO_KEY } from "../auth.js";
 import { FONT, chamfer, angledTab, edgeBar, circuitRail } from "../meshed.js";
+import { revealOnScroll } from "../motion.js";
 
 /**
  * Landing page (Design screen 02 → "SCREEN 1 — LANDING (meshed)") — the app entry /
@@ -298,8 +299,9 @@ export function renderLanding(
     marginBottom: "30px",
   } satisfies Partial<CSSStyleDeclaration>);
   badge.innerHTML =
-    `<span style="width:6px;height:6px;background:var(--ready);border-radius:50%;` +
-    `box-shadow:0 0 8px var(--ready)"></span> TURN-BASED CYBER ARTILLERY`;
+    `<span class="fw-live-dot" style="width:6px;height:6px;background:var(--ready);` +
+    `border-radius:50%;box-shadow:0 0 8px var(--ready)"></span> ` +
+    `TURN-BASED CYBER ARTILLERY`;
 
   const h1 = el("h1", "fw-hero-title");
   Object.assign(h1.style, {
@@ -459,7 +461,7 @@ export function renderLanding(
   const strip = section("fw-howstrip");
   const stripInner = container("1280px");
   stripInner.appendChild(sectionLabel("01 / HOW IT PLAYS", "THE BREACH LOOP"));
-  const stripGrid = el("div", "fw-howstrip-grid");
+  const stripGrid = el("div", "fw-howstrip-grid fw-reveal-group");
   Object.assign(stripGrid.style, {
     display: "grid",
     gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))",
@@ -518,7 +520,7 @@ export function renderLanding(
   rosterSub.textContent =
     "Every agent class is a playstyle — a signature trajectory with real advantages " +
     "and tradeoffs. No single class dominates; each strength is someone else's prey.";
-  const rosterGrid = el("div", "fw-roster-grid");
+  const rosterGrid = el("div", "fw-roster-grid fw-reveal-group");
   Object.assign(rosterGrid.style, {
     display: "grid",
     gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))",
@@ -536,7 +538,7 @@ export function renderLanding(
   const modes = section("fw-modes");
   const modesInner = container("1280px");
   modesInner.appendChild(sectionLabel("03 / GAME MODES", "CHOOSE THE ENGAGEMENT"));
-  const modesGrid = el("div", "fw-modes-grid");
+  const modesGrid = el("div", "fw-modes-grid fw-reveal-group");
   Object.assign(modesGrid.style, {
     display: "grid",
     gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))",
@@ -559,7 +561,7 @@ export function renderLanding(
   const arsenal = section("fw-arsenal");
   const arsenalInner = container("1280px");
   arsenalInner.appendChild(sectionLabel("04 / THE ARSENAL", "MASTER THE ARTILLERY"));
-  const arsenalGrid = el("div", "fw-arsenal-grid");
+  const arsenalGrid = el("div", "fw-arsenal-grid fw-reveal-group");
   Object.assign(arsenalGrid.style, {
     display: "grid",
     gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))",
@@ -585,7 +587,7 @@ export function renderLanding(
   const faq = section("fw-faq");
   const faqInner = container("860px");
   faqInner.appendChild(sectionLabel("05 / INTEL", "FREQUENTLY ASKED"));
-  const faqList = el("div", "fw-faq-list");
+  const faqList = el("div", "fw-faq-list fw-reveal-group");
   Object.assign(faqList.style, {
     display: "flex",
     flexDirection: "column",
@@ -708,6 +710,10 @@ export function renderLanding(
   );
   page.appendChild(content);
   root.appendChild(page);
+
+  // Cascade each card grid in as it scrolls into view (motion.ts guards reduced
+  // motion / no-IntersectionObserver by revealing immediately).
+  revealOnScroll([stripGrid, rosterGrid, modesGrid, arsenalGrid, faqList]);
 }
 
 /** A centered max-width wrapper (the landing's responsive `container()` helper). */
