@@ -1,6 +1,7 @@
 import Phaser from "phaser";
 import { muzzleOffset } from "@shared/sim";
 import { MECH_BODY_W, MECH_BODY_H } from "../world.js";
+import { lerpAngleDeg, shortestAngleDeltaDeg, smoothingFactor } from "./angleInterp.js";
 
 /**
  * Geometric placeholder mech (Phase 2, plan 03) — real art is Phase 6/UI-05.
@@ -50,10 +51,27 @@ const BADGE_PAD_X = 8; // horizontal text inset inside the badge rect
 const BADGE_PAD_Y = 4; // vertical text inset inside the badge rect
 const BADGE_GAP = 6; // gap above the floating HP number
 
+// --- Opponent-barrel ENTITY INTERPOLATION (smoothness). Synced state lands at
+// ~20Hz; the spectator barrel lerps toward the latest synced angle each frame
+// instead of snapping (see angleInterp.ts). TAU is the smoothing time constant;
+// a delta larger than SNAP_DEG is treated as a teleport (spawn / facing flip)
+// and applied instantly so the barrel never sweeps the long way through the
+// floor. The LOCAL player's own barrel is NOT interpolated — it is driven
+// immediately from local input (setBarrelAngle), so input stays responsive. ---
+const BARREL_TAU_MS = 70;
+const BARREL_SNAP_DEG = 60;
+
 export class MechView {
   private readonly body: Phaser.GameObjects.Rectangle;
   private readonly barrel: Phaser.GameObjects.Line;
   private static readonly BARREL_LEN = 22;
+
+  // Interpolation state for the spectator barrel. `current` is what is rendered;
+  // `target` is the latest synced angle. Defaults to the schema default (45) so a
+  // fresh view starts level. setBarrelAngle snaps both (immediate); the opponent
+  // path sets only `target` and interpolateBarrel() walks `current` toward it.
+  private currentBarrelDeg = 45;
+  private targetBarrelDeg = 45;
 
   // Floating HP widget — WORLD-space (NOT scroll-locked): it tracks the mech as
   // the camera pans the larger world. Scroll-locking it would detach it from the
@@ -238,13 +256,53 @@ export class MechView {
   }
 
   /**
-   * Rotate the barrel to the ABSOLUTE sim angle (0=right…90=up…180=left). The
-   * single y-down negation covers the whole 0–180 range, so a facing-left shot
-   * (e.g. absolute 150°) points the barrel up-and-left, matching the arc.
+   * Rotate the barrel to the ABSOLUTE sim angle (0=right…90=up…180=left),
+   * IMMEDIATELY (no interpolation). The single y-down negation covers the whole
+   * 0–180 range, so a facing-left shot (e.g. absolute 150°) points the barrel
+   * up-and-left, matching the arc.
+   *
+   * Used for the LOCAL player's own barrel (driven from local input — must be
+   * instant) and to snap a view to its initial angle. It also resets the
+   * interpolation buffers so a later switch to the interpolated path starts from
+   * the rendered angle (no sweep).
    */
   setBarrelAngle(absoluteAngleDeg: number): void {
     if (this.destroyed) return;
+    this.currentBarrelDeg = absoluteAngleDeg;
+    this.targetBarrelDeg = absoluteAngleDeg;
     this.barrel.setRotation(Phaser.Math.DegToRad(-absoluteAngleDeg));
+  }
+
+  /**
+   * Set the TARGET barrel angle for a spectated (non-local) mech without moving
+   * the barrel this instant — interpolateBarrel() walks the rendered angle toward
+   * it each frame (entity interpolation against the ~20Hz state stream).
+   */
+  setBarrelAngleTarget(absoluteAngleDeg: number): void {
+    if (this.destroyed) return;
+    this.targetBarrelDeg = absoluteAngleDeg;
+  }
+
+  /**
+   * Advance the spectator barrel one frame toward its target angle. Called per
+   * Phaser frame for NON-local mechs (MatchScene.updateNetworked). A large
+   * remaining delta (> BARREL_SNAP_DEG) is a teleport — spawn or facing flip —
+   * and is applied instantly so the barrel never sweeps through the floor; a
+   * small delta is eased with a frame-rate-independent factor.
+   */
+  interpolateBarrel(dtMs: number): void {
+    if (this.destroyed) return;
+    const delta = shortestAngleDeltaDeg(this.currentBarrelDeg, this.targetBarrelDeg);
+    if (Math.abs(delta) > BARREL_SNAP_DEG) {
+      this.currentBarrelDeg = this.targetBarrelDeg;
+    } else {
+      this.currentBarrelDeg = lerpAngleDeg(
+        this.currentBarrelDeg,
+        this.targetBarrelDeg,
+        smoothingFactor(dtMs, BARREL_TAU_MS),
+      );
+    }
+    this.barrel.setRotation(Phaser.Math.DegToRad(-this.currentBarrelDeg));
   }
 
   /** Flip the chassis to face left (-1) or right (+1) — visual cue only. */

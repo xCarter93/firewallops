@@ -1,5 +1,6 @@
 import Phaser from "phaser";
 import { TerrainMask } from "@shared/sim";
+import type { DirtyXRange } from "./terrainDirty.js";
 
 /**
  * Cosmetic terrain layer (Phase 2, plan 03).
@@ -86,36 +87,51 @@ export class TerrainView {
    * Repaint the cosmetic layer from the current (carved) mask so visible craters
    * mirror the authoritative holes. Called after each shot resolves (PLAY-04) —
    * the mask was already carved inside `applyShot`, so this just re-mirrors it.
+   *
+   * `region` (a [x0, x1) column band, from `carveDirtyXRange`) repaints ONLY the
+   * affected columns — a carve at (cx, cy, r) can only change the top-solid of
+   * columns within cx±r, so a full O(width·height) repaint per shot is wasteful
+   * and causes a frame hitch on impact. Omit `region` for the full repaint
+   * (initial build, reconnect RLE snapshot, rematch rebuild).
    */
-  repaintFromMask(mask: TerrainMask): void {
-    TerrainView.paint(this.scene, this.dt, mask);
+  repaintFromMask(mask: TerrainMask, region?: DirtyXRange): void {
+    TerrainView.paint(this.scene, this.dt, mask, region);
   }
 
   /**
    * Paint the field + terrain body + surface highlight from the mask into the
-   * DynamicTexture. Fills the whole field with the dominant dark color (so any
+   * DynamicTexture. Fills the field with the dominant dark color (so any
    * carved/non-solid cell shows the dark field), then paints the body where the
    * mask is solid via a cheap per-column fill (topmost solid y down to the
    * bottom; the mask is ground-is-larger-y, matching the harness column-paint).
+   *
+   * With `region` set, only columns [x0, x1) are touched: the opaque full-height
+   * field fill over that band erases the prior paint there (src-alpha 1 replaces,
+   * so no `dt.clear()` of the rest is needed), and the per-column scan is bounded
+   * to the band. Without `region`, the whole texture is cleared and repainted.
    */
   private static paint(
     scene: Phaser.Scene,
     dt: Phaser.Textures.DynamicTexture,
     mask: TerrainMask,
+    region?: DirtyXRange,
   ): void {
     const { width, height } = mask;
+    const x0 = region ? Math.max(0, Math.min(width, region.x0)) : 0;
+    const x1 = region ? Math.max(0, Math.min(width, region.x1)) : width;
+    if (x1 <= x0) return; // empty band — nothing to repaint.
 
     const g = scene.add.graphics();
 
-    // Opaque field over the whole texture — this also erases the prior paint on
-    // a repaint (full-coverage, src-alpha 1 replaces).
+    // Opaque field over the (band of the) texture — full-coverage src-alpha 1
+    // replaces, so this also erases the prior paint in the band on a repaint.
     g.fillStyle(TerrainView.FIELD, 1);
-    g.fillRect(0, 0, width, height);
+    g.fillRect(x0, 0, x1 - x0, height);
 
-    // Body fill where the mask is solid.
+    // Body fill where the mask is solid, scanning only the band's columns.
     g.fillStyle(TerrainView.BODY, 1);
-    const tops: number[] = new Array(width).fill(-1);
-    for (let x = 0; x < width; x++) {
+    const tops: number[] = [];
+    for (let x = x0; x < x1; x++) {
       let topSolid = -1;
       for (let y = 0; y < height; y++) {
         if (mask.isSolid(x, y)) {
@@ -123,21 +139,25 @@ export class TerrainView {
           break;
         }
       }
-      tops[x] = topSolid;
+      tops.push(topSolid);
       if (topSolid >= 0) {
         g.fillRect(x, topSolid, 1, height - topSolid);
       }
     }
 
-    // 2px brighter surface line along the terrain top edge.
+    // 2px brighter surface line along the terrain top edge (band only).
     g.fillStyle(TerrainView.SURFACE_HL, 1);
-    for (let x = 0; x < width; x++) {
-      if (tops[x] >= 0) {
-        g.fillRect(x, tops[x], 1, 2);
+    for (let i = 0; i < tops.length; i++) {
+      const top = tops[i];
+      if (top >= 0) {
+        g.fillRect(x0 + i, top, 1, 2);
       }
     }
 
-    dt.clear();
+    // Full repaint clears the whole texture first; a region repaint relies on the
+    // opaque band fill above to replace its pixels (drawing the band-only
+    // graphics leaves the rest of the texture untouched).
+    if (!region) dt.clear();
     dt.draw(g, 0, 0);
     dt.render(); // Phaser 4 explicit flush (Pitfall 3).
     g.destroy();

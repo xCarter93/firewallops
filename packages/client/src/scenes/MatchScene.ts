@@ -15,6 +15,7 @@ import type { ShotResult } from "../match/shotResult.js";
 import { MechView } from "../view/MechView.js";
 import { AimView } from "../view/AimView.js";
 import { TerrainView } from "../view/TerrainView.js";
+import { carveDirtyXRange } from "../view/terrainDirty.js";
 import { ProjectileView } from "../view/ProjectileView.js";
 import { Fx } from "../view/Fx.js";
 import { Hud } from "../view/Hud.js";
@@ -506,15 +507,24 @@ export class MatchScene extends Phaser.Scene {
         view = new MechView(this, mobile.x, mobile.y);
         this.mechViews[id] = view;
         view.setTeamColor(mobile.team);
+        // Snap the barrel to its initial synced angle so a fresh spectated mech
+        // does not sweep from the default (interpolation starts from here).
+        view.setBarrelAngle(mobile.angleDeg);
         // Track a lightweight local mech record for FX float-damage anchoring.
         this.mechs.push({ id, x: mobile.x, y: mobile.y, hp: mobile.hp });
       }
 
-      // Facing, barrel (the spectator barrel render snaps to the server's
-      // ABSOLUTE angle), active outline, and team color apply EVERY patch — they
-      // never move the body, so they are safe mid-animation.
+      // Facing, barrel, active outline, and team color apply EVERY patch — they
+      // never move the body, so they are safe mid-animation. The LOCAL player's
+      // barrel is driven immediately from local input in updateNetworked, so we
+      // snap it here; a spectated (non-local) barrel is set as an interpolation
+      // TARGET and eased per-frame (interpolateBarrel) to remove the 20Hz snap.
       view.setFacing(mobile.facing >= 0 ? 1 : -1);
-      view.setBarrelAngle(mobile.angleDeg);
+      if (id === this.sessionId) {
+        view.setBarrelAngle(mobile.angleDeg);
+      } else {
+        view.setBarrelAngleTarget(mobile.angleDeg);
+      }
       view.setActive(id === state.activePlayer);
       view.setTeamColor(mobile.team);
       // CF-1: surface the synced peer-disconnect state on the canvas (dim mech +
@@ -647,7 +657,11 @@ export class MatchScene extends Phaser.Scene {
       for (const c of result.carves) {
         this.mask.carveCircle(c.cx, c.cy, c.r);
       }
-      this.terrain.repaintFromMask(this.mask);
+      // Repaint ONLY the columns the carves can touch (cx±r) — a full-field
+      // repaint per shot is an O(width·height) hitch on every impact. Falls back
+      // to a full repaint if the band can't be computed (no carves).
+      const dirty = carveDirtyXRange(result.carves, this.mask.width);
+      this.terrain.repaintFromMask(this.mask, dirty ?? undefined);
 
       if (impact) {
         // blastRadius for the FX ring: use the largest carve radius as a proxy.
@@ -820,6 +834,15 @@ export class MatchScene extends Phaser.Scene {
       this.hud.setCountdown(secs);
     } else {
       this.hud.hideCountdown();
+    }
+
+    // Entity interpolation: ease every SPECTATED (non-local) barrel toward its
+    // latest synced angle each frame, so an opponent's aim glides instead of
+    // stepping at the ~20Hz patch rate. The local mech's barrel is driven from
+    // local input below (immediate), so it is skipped here.
+    for (const id of Object.keys(this.mechViews)) {
+      if (id === this.sessionId) continue;
+      this.mechViews[id].interpolateBarrel(dtMs);
     }
 
     const canInput = this.isLocalActiveAndAiming();
