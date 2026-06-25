@@ -39,5 +39,19 @@ export const GAME_CONFIG: Phaser.Types.Core.GameConfig = {
     mode: Phaser.Scale.RESIZE,
     autoRound: true,
   },
+  // Zero-risk render hint (does NOT change world/HUD/input coordinates):
+  // powerPreference asks the browser for the discrete GPU on dual-GPU laptops.
+  // NOTE: true device-pixel (Retina) crispness is NOT a config flag here — with
+  // Scale.RESIZE the canvas is a 1:1 CSS↔backing-store map, so a sharp Hi-DPI
+  // render needs a manual backing-store + camera-zoom pass, and Phaser 4.1 has
+  // an open Hi-DPI line-rendering regression (phaserjs/phaser#7198). Deferred
+  // until it can be verified on a real Retina display (see plan).
+  render: {
+    powerPreference: "high-performance",
+  },
+  // `target` is a hint only (does not cap rAF); it tunes delta smoothing.
+  fps: {
+    target: 60,
+  },
   scene: [BootScene, MatchScene],
 };
