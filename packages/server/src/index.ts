@@ -61,13 +61,22 @@ export const PORT = resolvePort();
  * the auto-listen path.
  */
 export function buildServer(): Server {
-  const redisUrl = process.env.REDIS_URL; // unset locally → in-memory default
-  const redisWiring = resolveRedisWiring(redisUrl);
+  const redisUrl = process.env.REDIS_URL; // still boot-checked for liveness below.
+  // Colyseus presence/driver: IN-MEMORY by default (single-replica Railway). Redis
+  // presence/driver is OPT-IN via COLYSEUS_MULTI_REPLICA=1 — it is ONLY needed to
+  // coordinate MULTIPLE server instances. On a single replica it adds nothing but
+  // cross-process IPC + a `processId` registry kept in a PERSISTED Redis (RDB), whose
+  // stale entries survive restarts and make matchmaking/reconnect route to dead
+  // processes ("ipc_timeout: create room request timed out …" → reconnect fails →
+  // forfeit). So we do NOT wire Redis unless explicitly multi-replica, even when
+  // REDIS_URL is set (the boot check still pings Redis for liveness — it is simply
+  // not used for presence/driver). Scaling past one instance: set the flag.
+  const multiReplica = process.env.COLYSEUS_MULTI_REPLICA === "1";
+  const redisWiring = multiReplica ? resolveRedisWiring(redisUrl) : null;
 
   const gameServer = new Server({
     transport: new WebSocketTransport(),
-    // Wire Redis presence/driver ONLY when REDIS_URL is set (local dev keeps the
-    // in-memory default).
+    // In-memory presence/driver unless COLYSEUS_MULTI_REPLICA=1 (see above).
     ...(redisWiring
       ? { presence: redisWiring.presence, driver: redisWiring.driver }
       : {}),

@@ -446,18 +446,18 @@ export class MatchRoom extends Room<{ state: MatchState }> {
    * so a never-returning drop self-resolves at the window edge with no stall.
    */
   async onDrop(client: Client, _code?: number): Promise<void> {
+    // RECON-01: reconnection window. Training gets a LONGER window (resilience B2):
+    // a solo range has no opponent/stats, so a brief tab-suspend / main-thread stall
+    // should recover instead of forfeiting; a real match keeps the tighter 30s.
+    const windowSecs = this.isTraining ? 60 : 30;
     console.log(
-      `[match] onDrop ${client.sessionId} phase=${this.state.phase} code=${String(_code)} — opening 30s reconnection window`,
+      `[match] onDrop ${client.sessionId} phase=${this.state.phase} code=${String(_code)} training=${String(this.isTraining)} — opening ${windowSecs}s reconnection window`,
     );
     const m = this.state.mobiles.get(client.sessionId);
     if (m) m.connected = false;
     void this.refreshListing();
     try {
-      // RECON-01: reconnection window (MUST pass the count — never the deprecated
-      // no-arg form). Training gets a LONGER window (resilience B2): a solo range
-      // has no opponent/stats, so a brief tab-suspend / main-thread stall should
-      // recover instead of forfeiting; a real match keeps the tighter 30s.
-      const windowSecs = this.isTraining ? 60 : 30;
+      // MUST pass the count — never the deprecated no-arg form.
       await this.allowReconnection(client, windowSecs);
       // Resolved → the client reconnected; onReconnect handled the snapshot resend.
       console.log(`[match] reconnected ${client.sessionId}`);
