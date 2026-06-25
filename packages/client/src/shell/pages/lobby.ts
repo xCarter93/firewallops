@@ -645,12 +645,17 @@ export function renderLobby(
   function renderRooms(rooms: LobbyRoomEntry[]): void {
     listEl.innerHTML = "";
 
-    if (rooms.length === 0) {
+    // C2: only list JOINABLE rooms — drop locked/in-progress rooms (their disabled
+    // "LOCKED" rows were noise; a room mid-match isn't actionable). Training rooms
+    // are already unlisted server-side, so this only hides real in-progress matches.
+    const joinable = rooms.filter((room) => !(room.metadata?.locked ?? false));
+
+    if (joinable.length === 0) {
       listEl.appendChild(renderEmptyState(() => openCreateForm()));
       return;
     }
 
-    for (const room of rooms) {
+    for (const room of joinable) {
       listEl.appendChild(renderRoomRow(room));
     }
   }

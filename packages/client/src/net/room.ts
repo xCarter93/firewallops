@@ -64,6 +64,13 @@ export interface NetHandlers {
   onMatchEnded(winnerTeam: number, draw: boolean): void;
   /** Full synced MatchState on every patch (HP/wind/phase/activePlayer/turnEndsAt/mobiles). */
   onStateChange(state: unknown): void;
+  /**
+   * Optional: the server REJECTED a fire (wrong phase / not the active player /
+   * unarmed item). The server sends `fireRejected { reason }` so the client can
+   * surface a brief notice instead of silently doing nothing (Phase 8 follow-up).
+   * Optional so the inert deep-link/reconnect handlers need not implement it.
+   */
+  onFireRejected?(reason: string): void;
 }
 
 /**
@@ -97,33 +104,61 @@ function toUint8Array(payload: unknown): Uint8Array {
 const recoKey = (roomId: string): string => `fwops:recoToken:${roomId}`;
 
 /**
- * Wire ALL inbound listeners against the supplied handlers. Shared by both the
- * fresh join (connectToMatch) and the reload reconnect (reconnectToMatch) so a
- * resumed match registers the IDENTICAL listeners — no logic, no mutation, just
- * forwarding server broadcasts/state to the scene.
+ * Wire ALL inbound listeners against the supplied handlers and RETURN a disposer
+ * that removes EXACTLY the listeners it added. Shared by the fresh join, the
+ * lobby join/create, and the reload reconnect so a resumed match registers the
+ * IDENTICAL listeners — no logic, no mutation, just forwarding server
+ * broadcasts/state to the scene.
+ *
+ * LISTENER LIFECYCLE (the leak fix): `@colyseus/sdk` APPENDS listeners —
+ * `onMessage` (nanoevents `.on`) returns an unbind fn; `onStateChange`
+ * (createSignal) APPENDS and is removed via `room.onStateChange.remove(cb)` with
+ * the EXACT callback reference. The room OUTLIVES the scene (Blocker 3), so a
+ * remount that re-registers WITHOUT removing the prior set stacks duplicate
+ * handlers that fire into the destroyed prior scene. The returned disposer (run
+ * on scene SHUTDOWN, and pre-emptively on re-attach via the WeakMap below)
+ * guarantees no stacking.
  */
-function registerHandlers(room: Room, handlers: NetHandlers): void {
+function registerHandlers(room: Room, handlers: NetHandlers): () => void {
   // NET-01: the authoritative shot outcome — the SOLE mutation trigger.
-  room.onMessage("shotResult", (result: ShotResult) =>
+  const offShot = room.onMessage("shotResult", (result: ShotResult) =>
     handlers.onShotResult(result),
   );
 
   // NET-05: the RLE terrain snapshot (raw bytes), sent on join AND on reconnect.
   // Coerce the view to an owned Uint8Array, then decode it into a TerrainMask.
-  room.onMessage("terrainSnapshot", (payload: unknown) =>
+  const offTerrain = room.onMessage("terrainSnapshot", (payload: unknown) =>
     handlers.onTerrainSnapshot(decodeMaskRLE(toUint8Array(payload))),
   );
 
   // Team-or-draw banner. The server's draw broadcast is `{ winnerTeam: -1, draw: true }`.
-  room.onMessage(
+  const offEnded = room.onMessage(
     "matchEnded",
     (payload: { winnerTeam: number; draw?: boolean }) =>
       handlers.onMatchEnded(payload.winnerTeam, payload.draw === true),
   );
 
+  // fireRejected (Phase 8 follow-up): forwarded to the optional handler so the
+  // scene can flash a brief notice; absent on inert handlers (a no-op then).
+  const offFireRejected = room.onMessage(
+    "fireRejected",
+    (payload: { reason?: string }) =>
+      handlers.onFireRejected?.(payload.reason ?? "rejected"),
+  );
+
   // The full synced state on every patch — HP, wind, phase, activePlayer,
   // turnEndsAt, mobiles. syncFromState is the SOLE driver of turn/wind/HP/phase.
-  room.onStateChange((state: unknown) => handlers.onStateChange(state));
+  // Hold the cb ref so the disposer can target it (createSignal.remove).
+  const onState = (state: unknown): void => handlers.onStateChange(state);
+  room.onStateChange(onState);
+
+  return () => {
+    offShot();
+    offTerrain();
+    offEnded();
+    offFireRejected();
+    room.onStateChange.remove(onState);
+  };
 }
 
 /**
@@ -132,15 +167,19 @@ function registerHandlers(room: Room, handlers: NetHandlers): void {
  * `leave`/match-end path it is cleared (see `clearReconnectToken`). The SDK
  * auto-reconnects TRANSIENT drops on its own; this token covers a hard reload.
  */
-function persistReconnectToken(room: Room): void {
+function persistReconnectToken(room: Room): () => void {
   try {
     sessionStorage.setItem(recoKey(room.roomId), room.reconnectionToken);
-    // Clear the token on a clean leave / match end so a reload after the match
-    // does NOT try to reconnect to a disposed room.
-    room.onLeave(() => clearReconnectToken(room.roomId));
   } catch {
     // sessionStorage unavailable (private mode / SSR) — reconnect just won't persist.
   }
+  // Clear the token on a clean leave / match end so a reload after the match does
+  // NOT try to reconnect to a disposed room. Registered unconditionally (the
+  // onLeave callback no-ops harmlessly if storage was unavailable). Hold the cb
+  // ref so the disposer can remove it (createSignal appends — see registerHandlers).
+  const onLeave = (): void => clearReconnectToken(room.roomId);
+  room.onLeave(onLeave);
+  return () => room.onLeave.remove(onLeave);
 }
 
 /** Clear a room's stored reconnection token (clean leave / match end). */
@@ -203,15 +242,73 @@ export function notifyShellMatchEnded(winnerTeam: number, draw: boolean): void {
 }
 
 /**
+ * The shell's fire-rejected hook (Phase 8 follow-up). Same fan-out pattern as the
+ * match-end hook: the scene owns the single `fireRejected` onMessage listener and
+ * forwards the reason here, and the play page renders a brief DOM toast.
+ */
+let shellFireRejectedHook: ((reason: string) => void) | null = null;
+
+/** Register the shell-side fire-rejected callback (the play page's toast). */
+export function setShellFireRejectedHook(
+  cb: ((reason: string) => void) | null,
+): void {
+  shellFireRejectedHook = cb;
+}
+
+/** Invoked by the scene's onFireRejected to fan the rejection out to the shell. */
+export function notifyShellFireRejected(reason: string): void {
+  shellFireRejectedHook?.(reason);
+}
+
+/**
+ * Per-room handler disposer registry (the leak fix). The MatchRoom OUTLIVES the
+ * Phaser scene (Blocker 3), and `@colyseus/sdk` APPENDS listeners — so without
+ * this, every scene mount / reconnect-remount / idempotent-rejoin stacks another
+ * full handler set on the SAME surviving Room, and the stale sets fire into the
+ * destroyed prior scene (the "background activity / screen flashes" + the
+ * drawImage-null crash 3f0b340 only suppressed). Keyed by Room (one live Room per
+ * session under matchSession); the entry holds the CURRENT registration's disposer.
+ */
+const handlerDisposers = new WeakMap<Room, () => void>();
+
+/**
+ * The single registration seam. Disposes ANY prior registration for this exact
+ * room BEFORE re-registering (so a remount/rejoin never stacks), then stores the
+ * fresh disposer. Used by attachToMatch (play-page handoff) AND every
+ * connect/join/create/reconnect path so the dedupe is universal.
+ */
+function attachInternal(room: Room, handlers: NetHandlers): void {
+  handlerDisposers.get(room)?.(); // dispose the prior registration, if any.
+  const offHandlers = registerHandlers(room, handlers);
+  const offToken = persistReconnectToken(room);
+  handlerDisposers.set(room, () => {
+    offHandlers();
+    offToken();
+  });
+}
+
+/**
+ * Remove the listeners attachToMatch/connect/join/create/reconnect registered for
+ * this room (NOT a match leave — listeners only; the connection survives). Called
+ * on MatchScene SHUTDOWN so a torn-down scene's handlers never fire on its
+ * destroyed Phaser objects. Idempotent (a missing entry is a no-op).
+ */
+export function disposeMatchHandlers(room: Room): void {
+  handlerDisposers.get(room)?.();
+  handlerDisposers.delete(room);
+}
+
+/**
  * Attach the scene's inbound listeners to an ALREADY-JOINED room (Blocker 3). Used
  * by the play-page handoff: the room was joined by the shell's matchSession (ONE
  * seat); this only registers the IDENTICAL listeners + refreshes the room-scoped
  * reconnection token. It does NOT construct a `Client` and does NOT join — so it
- * never opens a second seat. Returns the same room for convenience.
+ * never opens a second seat. Returns the same room for convenience. Re-attaching
+ * the same room disposes the prior registration first (attachInternal) — so the
+ * matchSession idempotent-rejoin and a scene remount are both leak-free.
  */
 export function attachToMatch(room: Room, handlers: NetHandlers): Room {
-  registerHandlers(room, handlers);
-  persistReconnectToken(room);
+  attachInternal(room, handlers);
   return room;
 }
 
@@ -225,8 +322,7 @@ export function attachToMatch(room: Room, handlers: NetHandlers): Room {
 export async function connectToMatch(handlers: NetHandlers): Promise<Room> {
   const client = new Client(SERVER_URL);
   const room = await client.joinOrCreate("match", {});
-  registerHandlers(room, handlers);
-  persistReconnectToken(room);
+  attachInternal(room, handlers);
   return room;
 }
 
@@ -245,8 +341,7 @@ export async function joinRoomById(
 ): Promise<Room> {
   const client = new Client(SERVER_URL);
   const room = await client.joinById(roomId, { token });
-  registerHandlers(room, handlers);
-  persistReconnectToken(room);
+  attachInternal(room, handlers);
   return room;
 }
 
@@ -263,8 +358,7 @@ export async function createMatch(
 ): Promise<Room> {
   const client = new Client(SERVER_URL);
   const room = await client.create("match", options);
-  registerHandlers(room, handlers);
-  persistReconnectToken(room);
+  attachInternal(room, handlers);
   return room;
 }
 
@@ -291,8 +385,7 @@ export async function reconnectToMatch(
   const client = new Client(SERVER_URL);
   try {
     const room = await client.reconnect(tok);
-    registerHandlers(room, handlers);
-    persistReconnectToken(room); // refresh the token for a subsequent reload.
+    attachInternal(room, handlers); // refresh listeners + token for a subsequent reload.
     return room;
   } catch {
     clearReconnectToken(roomId); // stale/expired token — drop it.

@@ -331,7 +331,12 @@ export function formatCountdown(msRemaining: number): string {
   return `${mins}:${rem < 10 ? "0" : ""}${rem}`;
 }
 
-/** The countdown is only shown while aiming (NET-04 / MatchScene:763). */
-export function shouldShowCountdown(phase: string): boolean {
-  return phase === "AIMING";
+/**
+ * The countdown shows only while AIMING AND when the server posts a POSITIVE
+ * deadline. Training disables the turn timer and sends `turnEndsAt === 0` (the
+ * "no timer" contract), so the `turnEndsAt > 0` gate is what suppresses the stale
+ * ticking readout there — a real match always carries a positive deadline.
+ */
+export function shouldShowCountdown(phase: string, turnEndsAt: number): boolean {
+  return phase === "AIMING" && turnEndsAt > 0;
 }

@@ -82,6 +82,18 @@ export type ReadyMessage = z.infer<typeof readySchema>;
 export const resetRangeSchema = z.object({}).strict().optional();
 export type ResetRangeMessage = z.infer<typeof resetRangeSchema>;
 
+/**
+ * `heartbeat` (resilience keepalive): a payload-less client ping sent on an
+ * interval while in a match. Training disables the turn timer, so without periodic
+ * client→server traffic an idle WebSocket can be closed by an edge proxy (e.g.
+ * Cloudflare's ~100s idle timeout) — this APPLICATION-level frame resets that idle
+ * timer (a protocol ping/pong may not). The handler is a NO-OP: receiving the
+ * frame is the entire point. Same `.strict().optional()` payload-less shape as
+ * `resetRange` (rejects spoofed keys, accepts the absent payload).
+ */
+export const heartbeatSchema = z.object({}).strict().optional();
+export type HeartbeatMessage = z.infer<typeof heartbeatSchema>;
+
 /** Per-player explicit OUTCOME enum (Phase-5 Blocker 2 — NO boolean `won`). */
 export const OUTCOMES = ["win", "loss", "draw", "abandon_loss"] as const;
 

@@ -61,6 +61,9 @@ const fakeRoom = {
   state: { mobiles: { forEach: () => {} } },
   onMessage: vi.fn(),
   onLeave: vi.fn(),
+  onDrop: vi.fn(),
+  onReconnect: vi.fn(),
+  send: vi.fn(),
   leave: vi.fn(async () => {}),
 };
 const leaveCurrent = vi.fn(async () => {});
@@ -83,9 +86,12 @@ const provideMatchRoom = vi.fn();
 vi.mock("../src/net/room.js", () => ({
   provideMatchRoom,
   setShellMatchEndHook: vi.fn(),
+  setShellFireRejectedHook: vi.fn(),
   notifyShellMatchEnded: vi.fn(),
+  notifyShellFireRejected: vi.fn(),
   takeProvidedMatchRoom: vi.fn(() => fakeRoom),
   attachToMatch: vi.fn((r: unknown) => r),
+  disposeMatchHandlers: vi.fn(),
 }));
 
 /** Wait a tick so the play page's async dynamic-import mount resolves. */

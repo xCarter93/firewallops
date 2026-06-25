@@ -119,6 +119,27 @@ function primaryButton(label: string): HTMLButtonElement {
   return b;
 }
 
+/** A muted, outline secondary CTA (pairs under a primaryButton). */
+function secondaryButton(label: string): HTMLButtonElement {
+  const b = document.createElement("button");
+  b.type = "button";
+  b.textContent = label;
+  Object.assign(b.style, {
+    marginTop: "var(--space-xs)",
+    padding: "11px 24px",
+    background: "transparent",
+    color: "var(--text-2)",
+    fontFamily: "var(--font-display)",
+    fontWeight: "700",
+    fontSize: "12px",
+    letterSpacing: "0.08em",
+    border: "1px solid var(--line)",
+    borderRadius: "var(--radius-3)",
+    cursor: "pointer",
+  } satisfies Partial<CSSStyleDeclaration>);
+  return b;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // 1. HANDLE PROMPT (first login → accounts.display_name)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -380,12 +401,79 @@ export function showLinkRestored(durationMs = 2200): () => void {
   };
 }
 
+/** Map a server fireRejected reason to brief UI copy. */
+function fireRejectedCopy(reason: string): string {
+  switch (reason) {
+    case "not-your-turn":
+      return "NOT YOUR TURN";
+    case "wrong-phase":
+      return "CAN'T FIRE RIGHT NOW";
+    case "not-armed":
+      return "TROJAN NOT ARMED";
+    default:
+      return "SHOT REJECTED";
+  }
+}
+
 /**
- * Show the terminal self-forfeit overlay when the reconnection window expires:
- * `LINK LOST — YOU FORFEITED THIS MATCH` → `RETURN TO LOBBY`. `onReturn` tears the
- * match down + returns to the lobby (the caller wires matchSession.leaveCurrent).
+ * Brief warn-colored toast when the server rejects a shot (C1). Auto-dismisses;
+ * returns a remover so the caller can tear it down early (e.g. on page cleanup).
  */
-export function showForfeited(onReturn: () => void): () => void {
+export function showFireRejectedToast(
+  reason: string,
+  durationMs = 1800,
+): () => void {
+  const toast = document.createElement("div");
+  toast.className = "fw-toast";
+  Object.assign(toast.style, {
+    position: "fixed",
+    top: "var(--space-lg)",
+    left: "50%",
+    transform: "translateX(-50%)",
+    zIndex: "1001",
+    padding: "10px var(--space-lg)",
+    background: "var(--surface)",
+    border: "1px solid var(--warn)",
+    borderRadius: "var(--radius-3)",
+    color: "var(--warn)",
+    fontFamily: "var(--font-display)",
+    fontWeight: "700",
+    fontSize: "12px",
+    letterSpacing: "0.12em",
+    boxShadow: "0 0 24px -6px rgba(245,158,11,0.5)",
+  } satisfies Partial<CSSStyleDeclaration>);
+  toast.textContent = fireRejectedCopy(reason);
+  document.body.appendChild(toast);
+  const remove = (): void => toast.remove();
+  const t = setTimeout(remove, durationMs);
+  return () => {
+    clearTimeout(t);
+    remove();
+  };
+}
+
+/** A small muted monospace diagnostic line (e.g. the WS close code). */
+function detailLine(text: string): HTMLDivElement {
+  const d = document.createElement("div");
+  Object.assign(d.style, {
+    fontFamily: "var(--font-mono)",
+    fontSize: "11px",
+    letterSpacing: "0.08em",
+    color: "var(--muted)",
+    marginTop: "var(--space-xs)",
+  } satisfies Partial<CSSStyleDeclaration>);
+  d.textContent = text;
+  return d;
+}
+
+/**
+ * Show the terminal self-forfeit overlay when reconnection has definitively failed
+ * (the SDK exhausted its retries / a non-recoverable close): `LINK LOST — YOU
+ * FORFEITED THIS MATCH` → `RETURN TO LOBBY`. `onReturn` tears the match down +
+ * returns to the lobby (the caller wires matchSession.leaveCurrent). `detail`
+ * surfaces the WS close code as a muted diagnostic line (founder ask).
+ */
+export function showForfeited(onReturn: () => void, detail?: string): () => void {
   const bd = backdrop();
   const c = card();
 
@@ -400,7 +488,46 @@ export function showForfeited(onReturn: () => void): () => void {
     onReturn();
   });
 
-  c.append(h, p, ret);
+  const kids: HTMLElement[] = detail ? [h, p, detailLine(detail), ret] : [h, p, ret];
+  c.append(...kids);
+  bd.appendChild(c);
+  document.body.appendChild(bd);
+  return remove;
+}
+
+/**
+ * Terminal "connection closed" overlay for a TRAINING room (B2) — training has no
+ * opponent/stats, so a dropped socket is NOT a forfeit. Neutral copy + a primary
+ * `RE-ENTER RANGE` (re-creates a fresh training room) and a secondary `RETURN TO
+ * LOBBY`. `detail` surfaces the close code.
+ */
+export function showConnectionClosed(
+  onReenter: () => void,
+  onReturn: () => void,
+  detail?: string,
+): () => void {
+  const bd = backdrop();
+  const c = card();
+
+  const h = heading("CONNECTION CLOSED", "var(--warn)");
+  const p = body("THE LINK TO THE RANGE WAS LOST.");
+  const reenter = primaryButton("RE-ENTER RANGE");
+  const ret = secondaryButton("RETURN TO LOBBY");
+
+  const remove = (): void => bd.remove();
+  reenter.addEventListener("click", () => {
+    remove();
+    onReenter();
+  });
+  ret.addEventListener("click", () => {
+    remove();
+    onReturn();
+  });
+
+  const kids: HTMLElement[] = detail
+    ? [h, p, detailLine(detail), reenter, ret]
+    : [h, p, reenter, ret];
+  c.append(...kids);
   bd.appendChild(c);
   document.body.appendChild(bd);
   return remove;

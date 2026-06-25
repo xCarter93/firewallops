@@ -258,9 +258,13 @@ describe("formatCountdown", () => {
 });
 
 describe("shouldShowCountdown", () => {
-  it("is true only in the AIMING phase", () => {
-    expect(shouldShowCountdown("AIMING")).toBe(true);
-    expect(shouldShowCountdown("RESOLVING")).toBe(false);
-    expect(shouldShowCountdown("WAITING")).toBe(false);
+  it("is true only in the AIMING phase with a positive deadline", () => {
+    expect(shouldShowCountdown("AIMING", 20_000)).toBe(true);
+    expect(shouldShowCountdown("RESOLVING", 20_000)).toBe(false);
+    expect(shouldShowCountdown("WAITING", 20_000)).toBe(false);
+  });
+  it("is false in training (turnEndsAt === 0) even while AIMING", () => {
+    // Training disables the turn timer (turnEndsAt === 0) → no countdown.
+    expect(shouldShowCountdown("AIMING", 0)).toBe(false);
   });
 });

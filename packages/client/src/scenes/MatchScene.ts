@@ -22,6 +22,8 @@ import type { MatchSceneData } from "./BootScene.js";
 import {
   attachToMatch,
   connectToMatch,
+  disposeMatchHandlers,
+  notifyShellFireRejected,
   notifyShellMatchEnded,
   sendAim,
   sendFire,
@@ -197,10 +199,12 @@ export class MatchScene extends Phaser.Scene {
   private pendingTerrain?: TerrainMask;
   private syncedWind = 0;
   private turnEndsAt = 0;
-  // Local countdown anchor: the game-time ms at which the current turn expires.
-  // Re-anchored whenever the server's turnEndsAt value changes (a new turn).
-  private localTurnDeadline = 0;
-  private lastTurnEndsAt = -1;
+  // Authoritative countdown via a server-clock offset: game-time + serverClockOffset
+  // ≈ server clock. Recalibrated at each fresh turn (turnEndsAt changes, > 0). The
+  // countdown reads `turnEndsAt - serverNow`, so it resets per turn and survives an
+  // in-place reconnect. Training (turnEndsAt === 0) shows no countdown.
+  private serverClockOffset = 0;
+  private offsetTurnEndsAt = -1;
   // One-shot initial camera framing once the local mech first appears in state.
   private framedOnLocal = false;
   // The active player the camera is currently framed on (re-frames each turn).
@@ -289,9 +293,16 @@ export class MatchScene extends Phaser.Scene {
 
     // Blocker 3: the room connection survives this scene. Mark disposed on SHUTDOWN
     // so any in-flight Colyseus patch/broadcast that arrives after teardown is
-    // ignored instead of drawing into destroyed Phaser objects (drawImage-null).
+    // ignored instead of drawing into destroyed Phaser objects (drawImage-null) —
+    // AND remove this scene's room listeners so a remount never fires them again
+    // (the listener-leak fix: the SDK APPENDS, so a re-attach without removal stacks
+    // duplicate handlers on the surviving Room). disposeMatchHandlers is a no-op in
+    // hotseat (no room). CRITICAL: disposal is bound to SHUTDOWN ONLY — an in-place
+    // SDK reconnect (onReconnect in play.ts) does NOT shut the scene down, so the
+    // resumed scene keeps its listeners.
     this.events.once(Phaser.Scenes.Events.SHUTDOWN, () => {
       this.disposed = true;
+      if (this.room) disposeMatchHandlers(this.room);
     });
   }
 
@@ -398,6 +409,9 @@ export class MatchScene extends Phaser.Scene {
       onMatchEnded: (winnerTeam: number, draw: boolean) =>
         this.onMatchEnded(winnerTeam, draw),
       onStateChange: (s: unknown) => this.syncFromState(s as SyncedState),
+      // fireRejected → fan out to the shell's DOM toast (the scene owns the single
+      // onMessage listener; the shell renders the notice).
+      onFireRejected: (reason: string) => notifyShellFireRejected(reason),
     };
 
     // Bind the controller's fire sender once we hold the room (shared by both the
@@ -457,12 +471,15 @@ export class MatchScene extends Phaser.Scene {
     this.syncedWind = state.wind;
     this.turnEndsAt = state.turnEndsAt;
 
-    // Re-anchor the local countdown deadline whenever the server posts a NEW
-    // turnEndsAt (a fresh turn). We assume a full TURN_MS window remains (no
-    // server-time offset this phase) — drift ~RTT is acceptable.
-    if (state.turnEndsAt !== this.lastTurnEndsAt) {
-      this.lastTurnEndsAt = state.turnEndsAt;
-      this.localTurnDeadline = this.game.getTime() + TURN_MS_LOCAL;
+    // Calibrate the server-clock offset at each fresh turn (turnEndsAt changes to a
+    // positive value): at turn start the server set turnEndsAt = serverNow + TURN_MS,
+    // and this patch lands ~one-way-latency later, so serverNow ≈ turnEndsAt -
+    // TURN_MS_LOCAL here. Training sends turnEndsAt === 0 (no timer) — skip (the
+    // display gate below hides the countdown there).
+    if (state.turnEndsAt > 0 && state.turnEndsAt !== this.offsetTurnEndsAt) {
+      this.offsetTurnEndsAt = state.turnEndsAt;
+      this.serverClockOffset =
+        state.turnEndsAt - TURN_MS_LOCAL - this.game.getTime();
     }
 
     let activeMobile: SyncedMobile | undefined;
@@ -797,8 +814,9 @@ export class MatchScene extends Phaser.Scene {
     // Minimal countdown (NET-04): seconds until the local deadline anchored off
     // the server's turnEndsAt. The server is the real timeout authority; this is
     // a cosmetic readout that may drift ~RTT (CONTEXT minimal-countdown).
-    if (this.room && this.syncedPhase === "AIMING") {
-      const secs = (this.localTurnDeadline - this.game.getTime()) / 1000;
+    if (this.room && this.syncedPhase === "AIMING" && this.turnEndsAt > 0) {
+      const serverNow = this.game.getTime() + this.serverClockOffset;
+      const secs = (this.turnEndsAt - serverNow) / 1000;
       this.hud.setCountdown(secs);
     } else {
       this.hud.hideCountdown();

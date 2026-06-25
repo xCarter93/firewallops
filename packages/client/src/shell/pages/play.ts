@@ -1,10 +1,12 @@
 import type PhaserNamespace from "phaser";
 import type { Room } from "@colyseus/sdk";
+import { CloseCode } from "@colyseus/sdk";
 import { getToken } from "../auth.js";
 import { matchSession } from "../net/matchSession.js";
 import {
   provideMatchRoom,
   sendResetRange,
+  setShellFireRejectedHook,
   setShellMatchEndHook,
 } from "../../net/room.js";
 import type { NetHandlers } from "../../net/room.js";
@@ -14,6 +16,8 @@ import type { HudViewModel } from "../hud/hudViewModel.js";
 import {
   classifyJoinError,
   RECONNECT_WINDOW_SECONDS,
+  showConnectionClosed,
+  showFireRejectedToast,
   showForfeited,
   showLinkRestored,
   showPostMatch,
@@ -56,6 +60,16 @@ type PhaserGame = PhaserNamespace.Game;
  * `domHud: false` to MatchScene in that case).
  */
 const DOM_HUD = import.meta.env.VITE_DOM_HUD !== "0";
+
+/**
+ * Application-level keepalive interval (resilience B1). Training disables the turn
+ * timer, so a thinking player generates no WS traffic; an idle socket can be closed
+ * by an edge proxy (Cloudflare's ~100s idle timeout). A periodic client→server
+ * `heartbeat` frame resets that idle timer. ~25s stays comfortably under 100s.
+ * (Does NOT save a SUSPENDED tab — a frozen tab can't fire timers either; that case
+ * is the server's longer training reconnection window + RE-ENTER RANGE.)
+ */
+const HEARTBEAT_INTERVAL_MS = 25_000;
 
 /** The ONE normalized overlay contract shared with 06-03 + the binding (concern 6). */
 type HudOverlay = {
@@ -114,7 +128,15 @@ export function renderPlay(
   let stopHudRaf: (() => void) | null = null;
   let reconnecting: ReconnectingOverlay | null = null;
   let countdownTimer: ReturnType<typeof setInterval> | null = null;
+  let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   let matchOver = false;
+  /**
+   * Latched true once this room is confirmed TRAINING (a synced passive dummy).
+   * Captured WHILE connected because a terminal close may leave room.state empty —
+   * the terminal-close handler needs it to offer RE-ENTER RANGE instead of a
+   * forfeit (training has no opponent/stats, so a drop is not a forfeit).
+   */
+  let wasTraining = false;
   /** Removers for any mounted overlay so cleanup tears them all down. */
   const overlayRemovers: Array<() => void> = [];
 
@@ -146,10 +168,31 @@ export function renderPlay(
     }
   };
 
+  const clearHeartbeat = (): void => {
+    if (heartbeatTimer !== null) {
+      clearInterval(heartbeatTimer);
+      heartbeatTimer = null;
+    }
+  };
+
+  /** Start the resilience keepalive against `room` (clears any prior interval). */
+  const startHeartbeat = (room: Room): void => {
+    clearHeartbeat();
+    heartbeatTimer = setInterval(() => {
+      try {
+        room.send("heartbeat", {});
+      } catch {
+        // Socket mid-drop — the SDK is auto-reconnecting; the next tick resumes.
+      }
+    }, HEARTBEAT_INTERVAL_MS);
+  };
+
   const cleanup = (): void => {
     disposed = true;
     clearCountdown();
+    clearHeartbeat();
     setShellMatchEndHook(null); // detach the post-match hook so it can't fire after leave.
+    setShellFireRejectedHook(null); // detach the fire-rejected hook (C1).
     reconnecting?.remove();
     reconnecting = null;
     for (const remove of overlayRemovers.splice(0)) remove();
@@ -175,6 +218,10 @@ export function renderPlay(
     // it (registers its listeners on the SAME seat) instead of opening a second
     // Colyseus Client. No re-join, no second seat across the room→play swap.
     provideMatchRoom(room);
+
+    // Resilience keepalive (B1): keep the WS warm so an idle training socket isn't
+    // edge-proxy-dropped. Restarted each mount; cleared on cleanup.
+    startHeartbeat(room);
 
     // Phase 6 DOM HUD: mount the overlay over the canvas container and drive it
     // from an rAF tick that READS room.state snapshots (listener-ownership
@@ -209,6 +256,7 @@ export function renderPlay(
       if (trainingMounted) return true;
       if (!isTrainingRoom(room)) return false;
       trainingMounted = true;
+      wasTraining = true; // latch for the terminal-close RE-ENTER RANGE branch.
 
       // On-brand TRAINING label — top-left, pointer-events:none, above the canvas.
       const label = document.createElement("div");
@@ -370,27 +418,44 @@ export function renderPlay(
   };
 
   /**
-   * Drive the SELF reconnection overlay off the room's leave/rejoin. The SDK
-   * auto-reconnects transient drops; we show the overlay + a 30s countdown on a
-   * non-consented leave and attempt a room-scoped resume. On resume we re-provide
-   * + remount; on window expiry we show the terminal forfeit state.
+   * Wire the SELF reconnection lifecycle off the SDK's OWN signals (the leak/spiral
+   * fix). The `@colyseus/sdk` AUTO-reconnects transient drops internally (retries +
+   * backoff) and exposes:
+   *   - `onDrop(code)`  — a retry sequence STARTED → show the reconnecting overlay.
+   *   - `onReconnect()` — a retry SUCCEEDED, the SAME Room resumed IN PLACE (the
+   *     scene's listeners are still attached — no remount) → restore.
+   *   - `onLeave(code)` — TERMINAL only: `CONSENTED` (our own leave / post-match —
+   *     silent) or the SDK gave up (`FAILED_TO_RECONNECT` / `ABNORMAL_CLOSURE`).
+   * The old code mis-read `onLeave` as a recoverable drop and spun a doomed 30s
+   * resume against an already-dead seat — that spiral is gone.
    */
   const wireReconnection = (room: Room): void => {
-    // Colyseus: onLeave(code) — 1000 is a normal/consented close; anything else is
-    // an abnormal drop that the reconnection window covers.
+    room.onDrop((code: number) => {
+      console.warn(`[play] room.onDrop code=${code} — SDK auto-reconnecting`);
+      if (disposed || matchOver) return;
+      beginReconnect();
+    });
+    room.onReconnect(() => {
+      if (disposed || matchOver) return;
+      clearCountdown();
+      reconnecting?.remove();
+      reconnecting = null;
+      track(showLinkRestored());
+    });
     room.onLeave((code: number) => {
-      // Diagnostic (Phase-6 auto-boot investigation): log the WS close code so an
-      // abnormal drop is identifiable in the field — 1000 clean/intentional, 1001
-      // going-away (tab suspend / navigation), 1006 abnormal (ping-timeout /
-      // main-thread starvation / network loss).
       console.warn(`[play] room.onLeave code=${code}`);
       if (disposed || matchOver) return;
-      if (code === 1000) return; // a clean, intentional leave — no overlay.
-      beginReconnect();
+      if (code === CloseCode.CONSENTED) return; // our own leave / post-match — silent.
+      showTerminalClosed(code); // SDK gave up or a non-recoverable close — terminal.
     });
   };
 
-  /** Start the self-disconnect overlay + countdown + resume attempt. */
+  /**
+   * Show the reconnecting overlay while the SDK retries. The countdown is a COSMETIC
+   * upper bound mirroring the server's reconnection window — we do NOT drive the
+   * retry (the SDK does) and we do NOT open a parallel resume. On expiry we surface
+   * the terminal state (the server seat is gone by then anyway).
+   */
   const beginReconnect = (): void => {
     if (reconnecting || disposed || matchOver) return;
     let remaining = RECONNECT_WINDOW_SECONDS;
@@ -400,39 +465,62 @@ export function renderPlay(
     countdownTimer = setInterval(() => {
       remaining -= 1;
       reconnecting?.setRemaining(remaining);
-      if (remaining <= 0) {
-        clearCountdown();
-        // Window expired — the server forfeits the seat (RECON-04). Terminal state.
-        reconnecting?.remove();
-        reconnecting = null;
-        track(showForfeited(returnToLobby));
-      }
+      if (remaining <= 0) showTerminalClosed(CloseCode.FAILED_TO_RECONNECT);
     }, 1000);
-
-    // Attempt a room-scoped resume (the SDK may also auto-reconnect; either way a
-    // success swaps the held room and re-binds the scene).
-    void attemptResume();
   };
 
-  /** Try to resume the held room (room-scoped reconnection token). */
-  const attemptResume = async (): Promise<void> => {
-    try {
-      const resumed = await matchSession.reconnect(roomId, inertHandlers());
-      if (disposed) return;
-      if (resumed) {
-        clearCountdown();
-        reconnecting?.remove();
-        reconnecting = null;
-        track(showLinkRestored());
-        // Re-provide + remount Phaser against the resumed seat (terrain snapshot +
-        // state re-sync arrive on the fresh listeners).
-        wireReconnection(resumed);
-        mountPhaser(resumed);
-      }
-      // If null, the interval countdown above eventually shows the forfeit state.
-    } catch {
-      // Swallowed — the countdown drives the terminal forfeit state on expiry.
+  /** Map a terminal WS close code to a muted diagnostic line (founder ask). */
+  const closeCodeDetail = (code: number): string => {
+    const label =
+      code === CloseCode.FAILED_TO_RECONNECT
+        ? "RECONNECT FAILED"
+        : code === CloseCode.ABNORMAL_CLOSURE
+          ? "CONNECTION LOST"
+          : "CONNECTION CLOSED";
+    return `${label} (${code})`;
+  };
+
+  /**
+   * Terminal close: reconnection has definitively failed (or a non-recoverable
+   * close). Tear down the overlay/countdown and show the end state. In TRAINING
+   * (no opponent/stats) it is NOT a forfeit — offer RE-ENTER RANGE; otherwise the
+   * forfeit banner. Idempotent via the `reconnecting`/`matchOver` guards.
+   */
+  const showTerminalClosed = (code: number): void => {
+    if (disposed || matchOver) return;
+    clearCountdown();
+    reconnecting?.remove();
+    reconnecting = null;
+    const detail = closeCodeDetail(code);
+    if (wasTraining) {
+      track(showConnectionClosed(reenterRange, returnToLobby, detail));
+    } else {
+      track(showForfeited(returnToLobby, detail));
     }
+  };
+
+  /**
+   * RE-ENTER RANGE (training resilience): tear down this dead play page and create a
+   * FRESH training room, routing into it — the same flow the lobby TRAINING card
+   * uses. Falls back to the lobby if the create fails.
+   */
+  const reenterRange = (): void => {
+    cleanup();
+    void (async () => {
+      try {
+        const token = await getToken();
+        const fresh = await matchSession.create(
+          "TRAINING",
+          "training",
+          token ?? "",
+          inertHandlers(),
+        );
+        navigate(`/room/${fresh.roomId}`);
+      } catch (err) {
+        console.error("[play] re-enter range failed", err);
+        navigate("/lobby");
+      }
+    })();
   };
 
   /**
@@ -454,6 +542,13 @@ export function renderPlay(
   // The post-match banner: the scene fans match-end out to this hook (one room
   // listener, two consumers — the scene's HUD banner + this DOM banner).
   setShellMatchEndHook((winnerTeam, draw) => onMatchEnded(winnerTeam, draw));
+
+  // fireRejected (C1): the scene fans a rejected shot out to this hook → a brief
+  // DOM toast. track() removes any still-visible toast on page cleanup.
+  setShellFireRejectedHook((reason) => {
+    if (disposed) return;
+    track(showFireRejectedToast(reason));
+  });
 
   // ── enter /play ─────────────────────────────────────────────────────────────
   void (async () => {

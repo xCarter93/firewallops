@@ -74,11 +74,13 @@ import {
   selectItemSchema,
   readySchema,
   resetRangeSchema,
+  heartbeatSchema,
   type FireMessage,
   type AimMessage,
   type SelectItemMessage,
   type ReadyMessage,
   type ResetRangeMessage,
+  type HeartbeatMessage,
 } from "../match/messageSchemas.js";
 import { recordMatchResult } from "../meta/results.js";
 import { verifyClerk } from "../auth/clerk.js";
@@ -202,6 +204,12 @@ export class MatchRoom extends Room<{ state: MatchState }> {
     resetRange: validate(resetRangeSchema, (_client: Client, _payload: ResetRangeMessage) =>
       this.onResetRange(),
     ),
+    // Resilience keepalive (resilience B1): a payload-less client ping. Receiving
+    // the frame is the entire point — it resets edge-proxy idle timers that would
+    // otherwise close an idle training WS. The handler intentionally does nothing.
+    heartbeat: validate(heartbeatSchema, (_client: Client, _payload: HeartbeatMessage) => {
+      /* no-op keepalive — see heartbeatSchema */
+    }),
   };
 
   async onCreate(options?: { name?: string; mode?: MatchMode }): Promise<void> {
@@ -445,8 +453,12 @@ export class MatchRoom extends Room<{ state: MatchState }> {
     if (m) m.connected = false;
     void this.refreshListing();
     try {
-      // RECON-01: 30s window (MUST pass the count — never the deprecated no-arg form).
-      await this.allowReconnection(client, 30);
+      // RECON-01: reconnection window (MUST pass the count — never the deprecated
+      // no-arg form). Training gets a LONGER window (resilience B2): a solo range
+      // has no opponent/stats, so a brief tab-suspend / main-thread stall should
+      // recover instead of forfeiting; a real match keeps the tighter 30s.
+      const windowSecs = this.isTraining ? 60 : 30;
+      await this.allowReconnection(client, windowSecs);
       // Resolved → the client reconnected; onReconnect handled the snapshot resend.
       console.log(`[match] reconnected ${client.sessionId}`);
     } catch {
@@ -600,7 +612,22 @@ export class MatchRoom extends Room<{ state: MatchState }> {
       ssHitCharge: mobile.ssHitCharge,
       ssHitsToArm: SS_HITS_TO_ARM,
     });
-    if (!ok) return;
+    if (!ok) {
+      // fireRejected (Phase 8 follow-up): tell the sender WHY so the client can
+      // flash a brief notice instead of silently doing nothing. No authority leak —
+      // the gate already rejected the shot; this only narrates the same decision
+      // from the same inputs. Sent only to the offending client.
+      const reason =
+        this.state.phase !== "AIMING"
+          ? "wrong-phase"
+          : client.sessionId !== this.state.activePlayer
+            ? "not-your-turn"
+            : payload.itemId === "trojan" && mobile.ssHitCharge < SS_HITS_TO_ARM
+              ? "not-armed"
+              : "rejected";
+      client.send("fireRejected", { reason });
+      return;
+    }
 
     // The committed shot uses the payload's item + angle/power.
     mobile.selectedItemId = payload.itemId;
@@ -714,6 +741,11 @@ export class MatchRoom extends Room<{ state: MatchState }> {
    */
   private startTurn(): void {
     this.state.phase = "TURN_START";
+    // Leaving AIMING (post-shot OR a timeout-skip that routes straight here):
+    // zero the deadline so no stale countdown can render between turns. enterAiming
+    // re-arms it (real match) or keeps it 0 (training). Only the cosmetic countdown
+    // reads turnEndsAt, so this is purely presentation hygiene.
+    this.state.turnEndsAt = 0;
     this.state.activePlayer = advanceTurn(this.turnView());
     this.rollWind();
 
@@ -792,6 +824,9 @@ export class MatchRoom extends Room<{ state: MatchState }> {
   ): void {
     this.turnTimer?.clear();
     this.state.phase = "RESOLVING";
+    // Leaving AIMING → clear the deadline so the countdown can't keep ticking the
+    // stale AIMING value through RESOLVING (presentation-only; see startTurn).
+    this.state.turnEndsAt = 0;
 
     // AIM-01 AUTHORITATIVE clamp at the SINGLE shot-resolution seam. EVERY shot
     // path converges here — onFire's direct call AND onTimeout's auto-fire of a

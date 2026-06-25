@@ -57,8 +57,8 @@ describe("training: dummy death respawns + continues, NEVER ends (respawn / TR-4
     // Mirror the room's afterResolve training branch USING the SAME shared
     // predicate; the end/record flags flip ONLY on the (never-taken) end path.
     let respawned = false;
-    let endMatchCalled = false;
-    let recordCalled = false;
+    const endMatchCalled = false;
+    const recordCalled = false;
     let continued = false;
 
     function simulateAfterResolveTraining(dummyHp: number): void {
