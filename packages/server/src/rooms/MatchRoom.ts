@@ -83,6 +83,8 @@ import {
   type HeartbeatMessage,
 } from "../match/messageSchemas.js";
 import { recordMatchResult } from "../meta/results.js";
+import { recordMatchStart, recordMatchEnd } from "../meta/matches.js";
+import { buildMatchStartPlayers } from "../match/matchPersistence.js";
 import { verifyClerk } from "../auth/clerk.js";
 import { getConvex, api } from "../meta/convexClient.js";
 import {
@@ -154,6 +156,13 @@ export class MatchRoom extends Room<{ state: MatchState }> {
    * the synced `Mobile.displayName`, not this.
    */
   private accountIds = new Map<string, string>();
+
+  /**
+   * Scoped match-state durability (Phase 08): latched true once the durable
+   * `matches` roster has been written at real-match start, so `persistMatchStart`
+   * is a no-op if called again. Never set for training rooms.
+   */
+  private matchStartPersisted = false;
 
   /**
    * H4 per-sessionId rate limiters — SEPARATE buckets for the high-frequency
@@ -429,7 +438,36 @@ export class MatchRoom extends Room<{ state: MatchState }> {
     this.state.mobiles.forEach((m) => flags.push(m.ready));
     if (shouldAutoStart(this.state.mobiles.size, this.teamSize, flags)) {
       this.startTurn();
+      // Scoped durability (Phase 08): record the match roster the moment a REAL
+      // match starts (full + all-ready), so a mid-match crash still leaves a
+      // durable, attributable record. Fire-and-forget; never blocks the start.
+      this.persistMatchStart();
     }
+  }
+
+  /**
+   * Write the durable `matches` roster ONCE at real-match start (scoped
+   * attribution durability, Phase 08). Skipped for training (no opponent/stats,
+   * and the dummy has no accountId). Idempotent via `matchStartPersisted`; the
+   * Convex `recordStart` is also idempotent on roomId, so a re-issue is safe. The
+   * write itself is fire-and-forget and never throws (see meta/matches.ts).
+   */
+  private persistMatchStart(): void {
+    if (this.matchStartPersisted || this.isTraining) return;
+    this.matchStartPersisted = true;
+    const mobiles: { sessionId: string; team: number; displayName: string }[] = [];
+    this.state.mobiles.forEach((m) =>
+      mobiles.push({
+        sessionId: m.sessionId,
+        team: m.team,
+        displayName: m.displayName,
+      }),
+    );
+    recordMatchStart(
+      this.roomId,
+      this.mode,
+      buildMatchStartPlayers(mobiles, this.accountIds),
+    );
   }
 
   /**
@@ -446,14 +484,16 @@ export class MatchRoom extends Room<{ state: MatchState }> {
    * so a never-returning drop self-resolves at the window edge with no stall.
    */
   async onDrop(client: Client, _code?: number): Promise<void> {
-    // RECON-01: reconnection window. Training gets a MUCH longer window (resilience
-    // B2): a solo range has no opponent/stats, and the dominant drop is the player's
+    // RECON-01: reconnection window. The dominant real-match drop is the player's
     // own tab being backgrounded/frozen by Chrome (WS close 1001) while sitting in
-    // AIMING — which can last a minute+ while they read/copy something in another tab.
-    // 3 min lets the SDK auto-reconnect (or a hard-reload resume via the room-scoped
-    // token) recover the SAME room on return instead of forfeiting. A real match keeps
-    // the tighter 30s (an opponent is waiting).
-    const windowSecs = this.isTraining ? 180 : 30;
+    // AIMING — which can last a minute+ while they read/copy something in another
+    // tab. A tight 30s window turned those accidental tab-aways into forfeits. We
+    // grant 90s for a real match: this does NOT stall the present opponent, because
+    // the connection-independent turn timer keeps advancing and SKIPS the dropped
+    // player's turn (onTimeout, RECON-03) — so the longer window only buys the
+    // dropped player more time to auto-reconnect / hard-reload-resume the SAME room.
+    // Training keeps an even longer window (no opponent/stats; a drop is not a loss).
+    const windowSecs = this.isTraining ? 180 : 90;
     console.log(
       `[match] onDrop ${client.sessionId} phase=${this.state.phase} code=${String(_code)} training=${String(this.isTraining)} — opening ${windowSecs}s reconnection window`,
     );
@@ -584,6 +624,14 @@ export class MatchRoom extends Room<{ state: MatchState }> {
           },
         ],
       });
+      // Scoped durability (Phase 08): mark the durable match row "abandoned". The
+      // surviving team (if any) is the winner; recordEnd is first-terminal-wins, so
+      // a later normal endMatch will NOT downgrade this to "ended".
+      recordMatchEnd(
+        this.roomId,
+        "abandoned",
+        outcome.kind === "winner" ? outcome.team : undefined,
+      );
     }
 
     // APPLY THE TEAM-ELIM / TURN-ADVANCE OUTCOME. Every branch is safe to call
@@ -1114,6 +1162,9 @@ export class MatchRoom extends Room<{ state: MatchState }> {
     // EXPLICIT outcomes + granular per-player+event ids (Blocker 2) so a re-record
     // is a no-op and never collides with plan 05's abandon write.
     recordMatchResult(this.finalResultsPayload(winnerTeam));
+    // Scoped durability (Phase 08): flip the durable match row terminal. First
+    // terminal write wins, so an abandon that already marked it stays "abandoned".
+    if (!this.isTraining) recordMatchEnd(this.roomId, "ended", winnerTeam);
     void this.refreshListing();
   }
 
@@ -1123,6 +1174,7 @@ export class MatchRoom extends Room<{ state: MatchState }> {
     this.state.winnerTeam = -1;
     this.broadcast("matchEnded", { winnerTeam: -1, draw: true });
     recordMatchResult(this.finalResultsPayload(-1));
+    if (!this.isTraining) recordMatchEnd(this.roomId, "ended", -1);
     void this.refreshListing();
   }
 

@@ -13,7 +13,7 @@ import { getToken, SERVER_HTTP_URL } from "../auth.js";
  *                          with the Clerk Bearer token → accounts.display_name.
  *   2. SHARE-LINK ERROR  — `ROOM FULL` / `ROOM NOT FOUND` / generic join failure →
  *                          `BROWSE ROOMS` drops to /lobby.
- *   3. RECONNECTION      — self-disconnect (`CONNECTION LOST` + 30s countdown),
+ *   3. RECONNECTION      — self-disconnect (`CONNECTION LOST` + countdown),
  *                          `LINK RESTORED` toast, `LINK LOST — YOU FORFEITED…` terminal.
  *   4. POST-MATCH BANNER — win/loss/draw copy → `RETURN TO LOBBY`.
  *
@@ -23,8 +23,14 @@ import { getToken, SERVER_HTTP_URL } from "../auth.js";
  * overlays are the SELF-side + share-link + handle + post-match DOM surfaces.
  */
 
-/** The server-side reconnection window (seconds) — mirrors 05-05 allowReconnection. */
-export const RECONNECT_WINDOW_SECONDS = 30;
+/**
+ * The server-side real-match reconnection window (seconds) — MUST mirror the
+ * real-match `allowReconnection` window in MatchRoom.onDrop (currently 90s). This
+ * drives the cosmetic CONNECTION-LOST countdown only; the server is the real
+ * authority. Bumped 30→90 so an accidental tab-away (Chrome freezes the tab and
+ * drops the WS) has time to auto-reconnect instead of forfeiting.
+ */
+export const RECONNECT_WINDOW_SECONDS = 90;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // shared overlay primitives
