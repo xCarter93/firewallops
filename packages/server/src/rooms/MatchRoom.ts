@@ -446,10 +446,14 @@ export class MatchRoom extends Room<{ state: MatchState }> {
    * so a never-returning drop self-resolves at the window edge with no stall.
    */
   async onDrop(client: Client, _code?: number): Promise<void> {
-    // RECON-01: reconnection window. Training gets a LONGER window (resilience B2):
-    // a solo range has no opponent/stats, so a brief tab-suspend / main-thread stall
-    // should recover instead of forfeiting; a real match keeps the tighter 30s.
-    const windowSecs = this.isTraining ? 60 : 30;
+    // RECON-01: reconnection window. Training gets a MUCH longer window (resilience
+    // B2): a solo range has no opponent/stats, and the dominant drop is the player's
+    // own tab being backgrounded/frozen by Chrome (WS close 1001) while sitting in
+    // AIMING — which can last a minute+ while they read/copy something in another tab.
+    // 3 min lets the SDK auto-reconnect (or a hard-reload resume via the room-scoped
+    // token) recover the SAME room on return instead of forfeiting. A real match keeps
+    // the tighter 30s (an opponent is waiting).
+    const windowSecs = this.isTraining ? 180 : 30;
     console.log(
       `[match] onDrop ${client.sessionId} phase=${this.state.phase} code=${String(_code)} training=${String(this.isTraining)} — opening ${windowSecs}s reconnection window`,
     );
