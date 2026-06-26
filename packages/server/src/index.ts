@@ -100,11 +100,52 @@ export function buildServer(): Server {
 }
 
 /**
+ * Process-level diagnostics + resilience (Phase 08 auto-boot investigation).
+ *
+ * The auto-boot symptom presented as every client dropping with WS code 1001
+ * ("going away") — the signature of the CONTAINER being stopped, not a tab
+ * suspend. These handlers make the next occurrence conclusive AND stop a single
+ * bad async path from taking the whole process (and every live match) down:
+ *
+ *   - SIGTERM/SIGINT: log the receipt with a timestamp. If this line appears,
+ *     the platform (Railway) is stopping the container EXTERNALLY (deploy,
+ *     restart, healthcheck failure, or OOM-kill) — NOT a self-crash. This is an
+ *     additive listener; Colyseus's own `gracefullyShutdown` handler still runs.
+ *   - unhandledRejection / uncaughtException: log the full reason/stack and
+ *     SWALLOW it (do not exit). For a real-time game server, a process exit boots
+ *     every connected player, so we deliberately prefer staying up + logging over
+ *     the Node default of terminating. If a crash WAS the boot cause, this both
+ *     stops it and reveals the culprit in the logs.
+ */
+function installProcessGuards(): void {
+  for (const signal of ["SIGTERM", "SIGINT"] as const) {
+    process.on(signal, () => {
+      console.warn(
+        `[server] ${signal} received at ${new Date().toISOString()} — the platform is stopping this container EXTERNALLY (deploy / restart / healthcheck / OOM). Every client socket will close with code 1001. This is NOT a tab suspend.`,
+      );
+    });
+  }
+  process.on("unhandledRejection", (reason) => {
+    console.error(
+      "[server] unhandledRejection (swallowed — kept process alive to avoid booting live matches):",
+      reason,
+    );
+  });
+  process.on("uncaughtException", (err) => {
+    console.error(
+      "[server] uncaughtException (swallowed — kept process alive to avoid booting live matches):",
+      err,
+    );
+  });
+}
+
+/**
  * Start the server on the resolved port + bind host. Only invoked as the main
  * module (the real `pnpm start` / container entrypoint), so test imports of
  * `buildServer()` do not double-listen.
  */
 async function main(): Promise<void> {
+  installProcessGuards();
   const port = resolvePort();
   const host = resolveBindHost();
   const gameServer = buildServer();
