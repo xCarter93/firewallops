@@ -3,17 +3,15 @@
  *
  * RENAMED in Phase 9 from `matches.ts` → `matchDurability.ts` (the `matches`
  * MODULE + table name are freed for the LIVE authoritative match doc). The
- * function names (`recordStart`/`recordEnd`) and signatures are UNCHANGED — only
- * the table they query is renamed `matches` → `matchDurability`. A thin
- * `matches.ts` re-exports these two so the live Railway Colyseus server's
- * `api.matches.recordStart`/`recordEnd` callsites keep resolving through the
- * dual-stack window (review [A2]; both deleted at the plan-12 cutover).
+ * function names (`recordStart`/`recordEnd`) and signatures are UNCHANGED. The
+ * thin `matches.ts` alias that bridged the live Railway Colyseus server's
+ * `api.matches.*` callsites was deleted at the plan-12 Colyseus cutover (the
+ * dual-stack window is over).
  *
- * Convex is PERSISTENCE ONLY: the authoritative MatchRoom owns the game; these
- * mutations are the durable seam it invokes (fire-and-forget) via
- * `ConvexHttpClient.mutation(api.matches.*)`. They mirror the `accounts.ts`
- * idempotency discipline (every access hits the `by_room_id` index — no
- * full-table scan, Convex 32k-scan safe).
+ * These mutations are the durable attribution seam, now invoked SERVER-SIDE by
+ * the Convex turn machine (`match.ts`/`match_internal.ts` via `ctx.runMutation`)
+ * at match start/end. They mirror the `accounts.ts` idempotency discipline (every
+ * access hits the `by_room_id` index — no full-table scan, Convex 32k-scan safe).
  *
  *   - `recordStart` is idempotent on `room_id` (UPSERT): the first call inserts
  *     the active row with the roster; a repeat (e.g. a re-issue) refreshes the

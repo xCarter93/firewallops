@@ -12,7 +12,11 @@ export default defineConfig({
       // jsdom environment via a `// @vitest-environment jsdom` pragma so the
       // bare-Node default (environment: "node") still governs every other suite.
       "packages/client/test/**/*.test.ts",
-      "packages/server/test/**/*.test.ts",
+      // The golden NET-01 parity test (client preview ↔ server authority) was
+      // relocated here from packages/server/test/ at the Colyseus cutover (09-12,
+      // review [S]) so the highest-value invariant survives the server deletion. It
+      // imports pure logic from @firewallops/match-core + the client MatchController.
+      "packages/match-core/test/**/*.test.ts",
     ],
   },
 });

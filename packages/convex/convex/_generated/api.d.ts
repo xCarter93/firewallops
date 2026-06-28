@@ -19,8 +19,6 @@ import type * as match from "../match.js";
 import type * as matchAim from "../matchAim.js";
 import type * as matchDurability from "../matchDurability.js";
 import type * as match_internal from "../match_internal.js";
-import type * as matches from "../matches.js";
-import type * as migrations from "../migrations.js";
 import type * as presence from "../presence.js";
 
 import type {
@@ -41,8 +39,6 @@ declare const fullApi: ApiFromModules<{
   matchAim: typeof matchAim;
   matchDurability: typeof matchDurability;
   match_internal: typeof match_internal;
-  matches: typeof matches;
-  migrations: typeof migrations;
   presence: typeof presence;
 }>;
 

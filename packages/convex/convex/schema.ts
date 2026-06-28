@@ -45,9 +45,9 @@ export default defineSchema({
    * the `get` query strips it from returned mobiles (T-09-02, plan 04).
    *
    * NOTE: this REUSES the table name `matches` previously held by the durability
-   * ledger — which is now `matchDurability` below (review [F]). Rows under the old
-   * `matches` key are durability rows and are migrated to `matchDurability` by the
-   * one-off `migrations.ts:migrateDurabilityRows` internal mutation.
+   * ledger — which is now `matchDurability` below (review [F]). The one-off
+   * `migrations.ts` that moved legacy rows under the old `matches` key into
+   * `matchDurability` was deleted at the plan-12 Colyseus cutover (its job done).
    */
   matches: defineTable({
     // --- lifecycle ---
