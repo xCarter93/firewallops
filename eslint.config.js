@@ -12,6 +12,22 @@ export default tseslint.config(
     ignores: ["**/dist/**", "**/node_modules/**", ".claude/**", ".codex/**"],
   },
   ...tseslint.configs.recommended,
+  // Honor the leading-underscore convention for intentionally-unused vars/args
+  // across ALL packages (the per-file blocks below predate this and only covered
+  // shared/client-match/scenes + the now-deleted server package; this generalizes
+  // it so convex/match-core `_drop`/`_teamSize`-style omissions are not errors).
+  {
+    rules: {
+      "@typescript-eslint/no-unused-vars": [
+        "error",
+        {
+          argsIgnorePattern: "^_",
+          varsIgnorePattern: "^_",
+          caughtErrorsIgnorePattern: "^_",
+        },
+      ],
+    },
+  },
   {
     files: ["packages/shared/**/*.ts"],
     rules: {
@@ -115,24 +131,6 @@ export default tseslint.config(
                 "Scenes/views must go through MatchController.applyShot()/previewTrajectory() — the Phase 3 seam. Outcome sim calls live only in src/match/**.",
             },
           ],
-        },
-      ],
-    },
-  },
-  // @firewallops/server (Phase 3): honor the same leading-underscore convention
-  // for intentionally unused params. The v0 stub seams declare their real
-  // signatures but do not consume every arg yet — onAuth(_options, _context),
-  // getLoadout(_accountId), recordMatchResult(_payload) — so the shape is fixed
-  // for Plan 03/04 + Phase 5 (Clerk/economy) without tripping no-unused-vars.
-  {
-    files: ["packages/server/**/*.ts"],
-    rules: {
-      "@typescript-eslint/no-unused-vars": [
-        "error",
-        {
-          argsIgnorePattern: "^_",
-          varsIgnorePattern: "^_",
-          caughtErrorsIgnorePattern: "^_",
         },
       ],
     },

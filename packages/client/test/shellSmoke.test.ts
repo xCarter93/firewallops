@@ -62,80 +62,48 @@ let profileStub: { display_name: string; wins: number; losses: number } = {
   wins: 0,
   losses: 0,
 };
+// provideConvexMatch is the handoff the play page makes to the scene on the Convex
+// route (captured so the smoke can assert it fired once with the matchId).
+const provideConvexMatch = vi.fn();
 vi.mock("../src/net/convexClient.js", () => ({
   getMyProfile: vi.fn(async () => profileStub),
   setMyDisplayName: vi.fn(async () => {}),
   getLoadout: vi.fn(async () => ({ items: ["shot-1", "shot-2", "trojan"] })),
   createRoom: vi.fn(async () => "ROOM1"),
   joinMatch: vi.fn(async () => {}),
+  // play-page Convex-route surface (plan 09 / cutover):
+  provideConvexMatch,
+  resetRange: vi.fn(async () => {}),
+  subscribeMatch: vi.fn(() => vi.fn()), // returns a disposer
+  getLiveAim: vi.fn(() => ({ active: false, power: 0, angleDeg: 0 })),
+  getShotHold: vi.fn(() => ({ active: false, hp: {} })),
+  setShellFireRejectedHook: vi.fn(),
 }));
 
 // ── lobby's room-list subscription ───────────────────────────────────────────
-// Plan 08: the lobby page now renders the room list from the REACTIVE Convex query
-// via `subscribeLobbyConvex` (SYNCHRONOUS — returns a `LobbySubscription` with
-// `.close()` directly, no join await). The legacy async Colyseus `subscribeLobby`
-// is still exported (coexistence until plan 12) so we stub BOTH: the smoke only
-// exercises subscribeLobbyConvex now, with an empty initial room list.
+// The lobby page renders the room list from the REACTIVE Convex query via
+// `subscribeLobbyConvex` (SYNCHRONOUS — returns a `LobbySubscription` with
+// `.close()` directly, no join await). Stub it with an empty initial room list.
 vi.mock("../src/shell/net/lobbyClient.js", () => ({
-  subscribeLobby: vi.fn(async () => ({ close: vi.fn() })),
   subscribeLobbyConvex: vi.fn((onRooms: (rooms: unknown[]) => void) => {
     onRooms([]); // initial empty list — the lobby renders the empty state.
     return { close: vi.fn() };
   }),
 }));
 
-// ── matchSession: a fake single-owner room so /play reuses it (Blocker 3) ─────
-const fakeRoom = {
-  roomId: "ROOM1",
-  sessionId: "sess-local",
-  state: { mobiles: { forEach: () => {} } },
-  onMessage: vi.fn(),
-  onLeave: vi.fn(),
-  onDrop: vi.fn(),
-  onReconnect: vi.fn(),
-  send: vi.fn(),
-  leave: vi.fn(async () => {}),
-};
-const leaveCurrent = vi.fn(async () => {});
+// ── matchSession: the single-owner Convex session ────────────────────────────
+// Post-cutover the play page mounts the Convex route for any /play/:id and only
+// calls convexMatchSession.leaveCurrent() on a real EXIT — never on the room→play
+// swap (the canvas-lifecycle invariant this smoke proves).
 const convexLeaveCurrent = vi.fn(async () => {});
 vi.mock("../src/shell/net/matchSession.js", () => ({
-  matchSession: {
-    get current() {
-      return fakeRoom;
-    },
-    get currentRoomId() {
-      return "ROOM1";
-    },
-    join: vi.fn(async () => fakeRoom),
-    reconnect: vi.fn(async () => null),
-    leaveCurrent,
-  },
-  // Convex single-owner session (plan 09-06/07/08). For this smoke `currentMatchId`
-  // is null, so the play page's Convex gate (`currentMatchId === roomId`) is FALSE
-  // and /play/ROOM1 takes the (still-active) Colyseus reuse path — exactly the
-  // canvas-lifecycle invariant this smoke proves. Both the Convex TRAINING (plan 07)
-  // and Convex MULTIPLAYER (plan 08) branches share that single gate and are covered
-  // by the two-device human-verify gate, not this headless smoke.
   convexMatchSession: {
     get currentMatchId() {
-      return null;
+      return "ROOM1";
     },
     subscribe: vi.fn(),
     leaveCurrent: convexLeaveCurrent,
   },
-}));
-
-// ── net/room: capture provideMatchRoom (Blocker-3 handoff) ────────────────────
-const provideMatchRoom = vi.fn();
-vi.mock("../src/net/room.js", () => ({
-  provideMatchRoom,
-  setShellMatchEndHook: vi.fn(),
-  setShellFireRejectedHook: vi.fn(),
-  notifyShellMatchEnded: vi.fn(),
-  notifyShellFireRejected: vi.fn(),
-  takeProvidedMatchRoom: vi.fn(() => fakeRoom),
-  attachToMatch: vi.fn((r: unknown) => r),
-  disposeMatchHandlers: vi.fn(),
 }));
 
 /** Wait a tick so the play page's async dynamic-import mount resolves. */
@@ -149,8 +117,8 @@ describe("shell smoke", () => {
     signedIn = true;
     destroySpy.mockClear();
     gameCtor.mockClear();
-    provideMatchRoom.mockClear();
-    leaveCurrent.mockClear();
+    provideConvexMatch.mockClear();
+    convexLeaveCurrent.mockClear();
     // Plan 09-11 ([A1]): the lobby reads the profile via convexClient.getMyProfile()
     // (mocked above), NOT a REST fetch. Reset the profile stub to the default so a
     // populated display_name keeps the first-login handle prompt closed and the DOM
@@ -193,9 +161,9 @@ describe("shell smoke", () => {
     await flush();
     expect(document.querySelectorAll("#game-container")).toHaveLength(1);
     expect(gameCtor).toHaveBeenCalledTimes(1); // no double canvas
-    // Blocker 3: the play page handed the EXISTING room to the scene (no re-join).
-    expect(provideMatchRoom).toHaveBeenCalledTimes(1);
-    expect(provideMatchRoom).toHaveBeenCalledWith(fakeRoom);
+    // The play page handed the matchId to the scene via the Convex handoff (no re-join).
+    expect(provideConvexMatch).toHaveBeenCalledTimes(1);
+    expect(provideConvexMatch).toHaveBeenCalledWith("ROOM1");
 
     // (4) leaving /play destroys Phaser + removes the container (no blank-canvas).
     navigate("/lobby");
@@ -203,8 +171,8 @@ describe("shell smoke", () => {
     expect(destroySpy).toHaveBeenCalledWith(true);
     expect(document.getElementById("game-container")).toBeNull();
     // The room→play→lobby nav did NOT leave the match on the swap; leaving the
-    // match is matchSession's job only on a real quit / RETURN TO LOBBY.
-    expect(leaveCurrent).not.toHaveBeenCalled();
+    // match is convexMatchSession's job only on a real quit / RETURN TO LOBBY.
+    expect(convexLeaveCurrent).not.toHaveBeenCalled();
   });
 
   // ── UI-04 partial (Meshed Home Hub): the restyled lobby surfaces the player's

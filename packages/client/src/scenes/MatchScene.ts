@@ -20,17 +20,6 @@ import { ProjectileView } from "../view/ProjectileView.js";
 import { Fx } from "../view/Fx.js";
 import { Hud } from "../view/Hud.js";
 import type { MatchSceneData } from "./BootScene.js";
-import {
-  attachToMatch,
-  connectToMatch,
-  disposeMatchHandlers,
-  notifyShellFireRejected,
-  notifyShellMatchEnded,
-  sendAim,
-  sendFire,
-  sendSelectItem,
-  takeProvidedMatchRoom,
-} from "../net/room.js";
 import { ShotResultBridge } from "../net/shotResultBridge.js";
 import {
   takeProvidedConvexMatch,
@@ -41,11 +30,12 @@ import {
   setLiveAim as convexSetLiveAim,
   setShotHold as convexSetShotHold,
   subscribeAim as convexSubscribeAim,
+  notifyShellFireRejected,
+  notifyShellMatchEnded,
   type ConvexNetHandlers,
   type AimTelegraph,
 } from "../net/convexClient.js";
 import { convexMatchSession } from "../shell/net/matchSession.js";
-import type { Room } from "@colyseus/sdk";
 import {
   MAP,
   P1_ID,
@@ -95,13 +85,10 @@ const PAN_MS = 500; // frame-next-mech camera pan (UI-SPEC max)
 const MAX_SHAKE_MS = 300;
 const SHAKE_PER_DAMAGE = 0.0006; // shake amplitude per HP of total damage
 
-// --- Networked aim streaming (Phase 3) ---
-const AIM_THROTTLE_MS = 100; // max one aim message per ~100ms (Suggestion #8)
 // --- Convex live-aim telegraph (Plan 10) ---
-// The Convex `updateAim` emitter runs DELIBERATELY SLOWER than the Colyseus
-// ~100ms cadence: ≤5 Hz (≥200ms) AND only when the angle moved past a coarse
-// threshold (the server also coarse-quantizes to whole degrees + delta-gates the
-// write). Cosmetic-only, droppable (09-RESEARCH D-01). NEVER reuse AIM_THROTTLE_MS.
+// The Convex `updateAim` emitter runs at ≤5 Hz (≥200ms) AND only when the angle
+// moved past a coarse threshold (the server also coarse-quantizes to whole degrees
+// + delta-gates the write). Cosmetic-only, droppable (09-RESEARCH D-01).
 const CONVEX_AIM_THROTTLE_MS = 200; // ≤5 Hz emission cap.
 const CONVEX_AIM_DELTA_DEG = 1; // emit only past a ≥1° absolute-angle move.
 // Local mirror of the server TURN_MS (server config.ts). Used ONLY for the
@@ -203,11 +190,10 @@ export class MatchScene extends Phaser.Scene {
    * early-return on this flag.
    */
   private disposed = false;
-  private room?: Room;
   /**
-   * [Convex training, plan 07] The matchId the scene is driving off the Convex
-   * subscription, or `undefined` on the Colyseus path. When set, fire routes through
-   * the `convexFireShot` mutation (no `this.room`), and the live subscription disposer
+   * [Convex, plan 07/08] The matchId the scene is driving off the Convex
+   * subscription. Fire routes through the `convexFireShot` mutation, and the live
+   * subscription disposer
    * (`convexUnsub`) is torn down on SHUTDOWN. Only the TRAINING route sets this for
    * now (the multiplayer routes flip in plan 08).
    */
@@ -293,14 +279,10 @@ export class MatchScene extends Phaser.Scene {
     this.terrain = TerrainView.build(this, this.mask);
 
     // Boot mode flag (Authority Decision 6): networked is opt-in; hotseat is the
-    // DEFAULT dev loop. `VITE_NETWORKED=1 pnpm --filter @firewallops/client dev`
-    // starts networked mode. The Convex TRAINING route (plan 07) also takes the
-    // networked path even with VITE_NETWORKED off — the play page provides a Convex
-    // matchId (peeked here, NOT consumed; createNetworked takes it) so the scene
-    // drives off the Convex subscription instead of a Colyseus room.
-    const flag = import.meta.env.VITE_NETWORKED;
-    this.networked =
-      flag === "1" || flag === "true" || hasProvidedConvexMatch();
+    // DEFAULT dev loop. The play page provides a Convex matchId before booting Phaser
+    // (peeked here, NOT consumed; createNetworked takes it), so the scene drives off
+    // the Convex subscription. With no provided match, the local hotseat dev loop runs.
+    this.networked = hasProvidedConvexMatch();
 
     if (this.networked) {
       this.createNetworked();
@@ -360,18 +342,12 @@ export class MatchScene extends Phaser.Scene {
       this.scale.off(Phaser.Scale.Events.RESIZE, this.onResize, this),
     );
 
-    // Blocker 3: the room connection survives this scene. Mark disposed on SHUTDOWN
-    // so any in-flight Colyseus patch/broadcast that arrives after teardown is
-    // ignored instead of drawing into destroyed Phaser objects (drawImage-null) —
-    // AND remove this scene's room listeners so a remount never fires them again
-    // (the listener-leak fix: the SDK APPENDS, so a re-attach without removal stacks
-    // duplicate handlers on the surviving Room). disposeMatchHandlers is a no-op in
-    // hotseat (no room). CRITICAL: disposal is bound to SHUTDOWN ONLY — an in-place
-    // SDK reconnect (onReconnect in play.ts) does NOT shut the scene down, so the
-    // resumed scene keeps its listeners.
+    // Mark disposed on SHUTDOWN so any in-flight Convex patch/broadcast that arrives
+    // after teardown is ignored instead of drawing into destroyed Phaser objects
+    // (drawImage-null). The Convex subscription is torn down in bindConvexMatch's own
+    // SHUTDOWN handler (convexMatchSession.unsubscribe).
     this.events.once(Phaser.Scenes.Events.SHUTDOWN, () => {
       this.disposed = true;
-      if (this.room) disposeMatchHandlers(this.room);
     });
   }
 
@@ -490,50 +466,18 @@ export class MatchScene extends Phaser.Scene {
     // handlers above are the SAME contract — onStateChange/onShotResult/onTerrainSnapshot
     // /onMatchEnded drive the UNCHANGED render path; we only add onLocalIdentity (the
     // Convex `localMobileId` → setLocalMobileId, [I], the replacement for room.sessionId)
-    // and route the fire seam through the `fireShot` mutation (no `this.room`). All the
-    // `if (this.room)` aim/select sends below harmlessly no-op (room is undefined) — the
-    // Convex `fireShot` mutation carries the committed angle/power/itemId, so the server
-    // re-derives the outcome with no streamed aim. Return early so the Colyseus
-    // adopt/connect path is never entered on the training route.
+    // and route the fire seam through the `fireShot` mutation. The Convex `fireShot`
+    // carries the committed angle/power/itemId, so the server re-derives the outcome
+    // with no streamed aim.
     const providedConvexMatchId = takeProvidedConvexMatch();
-    if (providedConvexMatchId) {
-      this.bindConvexMatch(providedConvexMatchId, handlers);
+    if (!providedConvexMatchId) {
+      // Post-cutover, networked mode is reached ONLY via the Convex route — the play
+      // page provides the matchId before booting Phaser (hasProvidedConvexMatch gates
+      // `this.networked`). There is no Colyseus adopt/connect fallback anymore.
+      console.error("[net] createNetworked: no Convex matchId provided");
       return;
     }
-
-    // Bind the controller's fire sender once we hold the room (shared by both the
-    // adopted-room handoff and the standalone connect path). The seam stays live:
-    // the scene still calls controller.applyShot; the controller forwards here
-    // with the ABSOLUTE sim angle (the server schema validates 0..180).
-    const bindRoom = (room: Room): void => {
-      this.room = room;
-      this.sessionId = room.sessionId;
-      this.controller.setFireSender((aim) =>
-        sendFire(this.room!, aim.angleDeg, aim.power, this.selectedShotId),
-      );
-    };
-
-    // BLOCKER 3: prefer the room the SHELL already joined (provided via the play
-    // page from matchSession.current). Adopting it registers the scene's listeners
-    // on the SAME seat — no second Colyseus Client, no second seat. Only a
-    // standalone VITE_NETWORKED dev boot (no shell, no provided room) falls through
-    // to connectToMatch (which opens its own connection — dev-only).
-    const adopted = takeProvidedMatchRoom();
-    if (adopted) {
-      bindRoom(attachToMatch(adopted, handlers));
-      // The adopted room's schema is ALREADY synced (from the staging room), and
-      // Colyseus onStateChange fires only on the NEXT patch — so without an explicit
-      // initial sync the adopting client (the room CREATOR) renders no mechs and
-      // never sets its input gate, so it misses turn 1 and gets auto-forfeited. Mirror
-      // room.ts's post-join immediate render. syncFromState guards the unsynced shape.
-      this.syncFromState(adopted.state as SyncedState);
-    } else {
-      void connectToMatch(handlers)
-        .then(bindRoom)
-        .catch((err: unknown) => {
-          console.error("[net] failed to join match", err);
-        });
-    }
+    this.bindConvexMatch(providedConvexMatchId, handlers);
   }
 
   /**
@@ -555,9 +499,8 @@ export class MatchScene extends Phaser.Scene {
 
     // The fire seam → the Convex `fireShot` mutation (fire-and-forget; the server
     // re-derives every outcome, plan 05). The committed ABSOLUTE angle + power +
-    // selected item ride the mutation — no streamed aim is needed (the Colyseus
-    // `sendAim`/`sendSelectItem` calls in updateNetworked/fireNetworked are
-    // `if (this.room)`-guarded, so they no-op on this path).
+    // selected item ride the mutation — no streamed aim is needed. The weapon-select
+    // intent goes through the `selectItem` mutation in updateNetworked.
     this.controller.setFireSender((aim) => {
       void convexFireShot(
         matchId,
@@ -1017,7 +960,7 @@ export class MatchScene extends Phaser.Scene {
     // Minimal countdown (NET-04): seconds until the local deadline anchored off
     // the server's turnEndsAt. The server is the real timeout authority; this is
     // a cosmetic readout that may drift ~RTT (CONTEXT minimal-countdown).
-    if (this.room && this.syncedPhase === "AIMING" && this.turnEndsAt > 0) {
+    if (this.syncedPhase === "AIMING" && this.turnEndsAt > 0) {
       const serverNow = this.game.getTime() + this.serverClockOffset;
       const secs = (this.turnEndsAt - serverNow) / 1000;
       this.hud.setCountdown(secs);
@@ -1087,19 +1030,12 @@ export class MatchScene extends Phaser.Scene {
         }
       }
       // Send once per real selection change (the gate-rejected trojan leaves
-      // selectedShotId unchanged, so no stray send), and only after connect. On the
-      // Convex path (no this.room) route the same NET-02 intent through the
-      // `selectItem` mutation so a multiplayer weapon switch reaches the authority
-      // (plan 08); the Colyseus path keeps sendSelectItem.
-      if (this.selectedShotId !== priorShotId) {
-        if (this.room) {
-          sendSelectItem(this.room, this.selectedShotId);
-        } else if (this.convexMatchId) {
-          void convexSelectItem(this.convexMatchId, this.selectedShotId).catch(
-            (err: unknown) =>
-              console.error("[convex] selectItem failed", err),
-          );
-        }
+      // selectedShotId unchanged, so no stray send): route the NET-02 weapon-switch
+      // intent through the Convex `selectItem` mutation so it reaches the authority.
+      if (this.selectedShotId !== priorShotId && this.convexMatchId) {
+        void convexSelectItem(this.convexMatchId, this.selectedShotId).catch(
+          (err: unknown) => console.error("[convex] selectItem failed", err),
+        );
       }
 
       // Aim preview (local cosmetic, ONLY for the local active player). Drive the
@@ -1125,17 +1061,11 @@ export class MatchScene extends Phaser.Scene {
         selectedShotId: this.selectedShotId,
       });
 
-      // Throttled aim streaming (~100ms); committed=false during the hold.
       const now = this.game.getTime();
-      if (now - this.lastAimSentAt >= AIM_THROTTLE_MS && this.room) {
-        sendAim(this.room, absAngle, this.power, false);
-        this.lastAimSentAt = now;
-      }
 
-      // [Plan 10] Convex opponent-aim telegraph (cosmetic-only). On the pure-Convex
-      // path (no this.room) emit the LOCAL active player's absolute angle through
-      // the throttled `updateAim` mutation — DELIBERATELY SLOWER than the Colyseus
-      // cadence: ≤5 Hz (≥200ms) AND only when the angle moved past CONVEX_AIM_DELTA_DEG
+      // [Plan 10] Convex opponent-aim telegraph (cosmetic-only). Emit the LOCAL active
+      // player's absolute angle through the throttled `updateAim` mutation —
+      // ≤5 Hz (≥200ms) AND only when the angle moved past CONVEX_AIM_DELTA_DEG
       // (≥1°). The server also coarse-quantizes + delta-gates the write, so a held
       // aim costs zero writes (T-09-20). Fire-and-forget; it NEVER gates fire.
       if (
@@ -1168,10 +1098,10 @@ export class MatchScene extends Phaser.Scene {
   }
 
   /**
-   * Fire in networked mode through THE SEAM. The controller forwards (aim, def)
-   * to the injected sendFire — fire-and-forget. We send `committed: true` first
-   * so the server locks power precisely, then call applyShot. We do NOT animate
-   * here — the broadcast `animateShot` owns the animation.
+   * Fire in networked mode through THE SEAM. The controller forwards (aim, def) to
+   * the injected fireShot sender — fire-and-forget (the committed angle/power/itemId
+   * ride the mutation). We do NOT animate here — the reactive `lastShot` →
+   * `animateShot` owns the animation.
    */
   private fireNetworked(view: MechView): void {
     // [H] Out-of-turn / wrong-phase fire UX (preserved). The Colyseus server used to
@@ -1208,10 +1138,8 @@ export class MatchScene extends Phaser.Scene {
     aim.x = muzzle.x;
     aim.y = muzzle.y;
 
-    // Commit power precisely (Agreed Concern #6) before the fire intent.
-    if (this.room) sendAim(this.room, aim.angleDeg, this.power, true);
-
-    // THE SEAM CALL — fire-and-forget to the injected net sender.
+    // THE SEAM CALL — fire-and-forget to the injected fireShot sender (the committed
+    // angle/power/itemId ride the mutation; the server re-derives the outcome).
     this.controller.applyShot(aim, def);
 
     this.power = 0;
