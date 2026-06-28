@@ -10,7 +10,9 @@
 
 import type * as accounts from "../accounts.js";
 import type * as health from "../health.js";
+import type * as matchDurability from "../matchDurability.js";
 import type * as matches from "../matches.js";
+import type * as migrations from "../migrations.js";
 
 import type {
   ApiFromModules,
@@ -21,7 +23,9 @@ import type {
 declare const fullApi: ApiFromModules<{
   accounts: typeof accounts;
   health: typeof health;
+  matchDurability: typeof matchDurability;
   matches: typeof matches;
+  migrations: typeof migrations;
 }>;
 
 /**
