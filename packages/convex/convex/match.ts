@@ -32,10 +32,32 @@ import {
   spawnLayout,
   teamSizeForMode,
   SS_HITS_TO_ARM,
+  GRAVITY,
+  resolveDwellMs,
   MAP,
+  runServerShot,
+  shouldResolveFire,
+  shouldStartImmediately,
+  applyTrainingHpWriteBack,
+  resetPlayerShotStateOn,
+  forfeitOutcome,
+  surfaceY,
+  settledY,
+  randomDummyX,
+  toTurnMobile,
+  type ServerMech,
   type MatchMode,
 } from "@firewallops/match-core";
-import { TerrainMask, encodeMaskRLE } from "@shared/sim";
+import {
+  TerrainMask,
+  encodeMaskRLE,
+  decodeMaskRLE,
+  clampAbsoluteAngle,
+  muzzleOffset,
+  LOADOUT,
+  type ProjectileDef,
+  type ShotInput,
+} from "@shared/sim";
 
 /**
  * The default per-mobile HP (ported from `MatchRoom.onJoin` — `mobile.hp = 100`).
@@ -49,6 +71,65 @@ const DEFAULT_HP = 100;
  */
 function exactBytes(u8: Uint8Array): ArrayBuffer {
   return u8.slice().buffer;
+}
+
+/**
+ * Coerce the stored `v.bytes()` `ArrayBuffer` back to a FRESH `Uint8Array`
+ * before `decodeMaskRLE` (RESEARCH Pitfall 5 — the read side). Mirrors the
+ * client's `room.ts` `toUint8Array` byteOffset coercion: a stored buffer must be
+ * wrapped fresh so the decoder reads from offset 0 over the exact bytes.
+ */
+function toUint8Array(buf: ArrayBuffer): Uint8Array {
+  return new Uint8Array(buf);
+}
+
+/** Per-mobile shape on the live `matches.mobiles[]` doc (schema mirror). */
+type LiveMobile = {
+  mobileId: string;
+  accountId?: string;
+  team: number;
+  x: number;
+  y: number;
+  hp: number;
+  angleDeg: number;
+  power: number;
+  selectedItemId: string;
+  accumulatedDelay: number;
+  ssHitCharge: number;
+  facing: number;
+  ready: boolean;
+  passive: boolean;
+  displayName: string;
+  connected: boolean;
+};
+
+/** The stable id of the server-owned training dummy (mirrors MatchRoom). */
+const DUMMY_ID = "dummy";
+
+/**
+ * Build a fresh passive 100hp team-1 training dummy mobile (ports
+ * `MatchRoom.spawnDummy`). `passive: true` so `advanceTurn` NEVER selects it; no
+ * `accountId`, so it can never reach the abandon / final-results write.
+ */
+function spawnDummy(mask: TerrainMask): LiveMobile {
+  const x = randomDummyX(mask);
+  return {
+    mobileId: DUMMY_ID,
+    team: 1,
+    x,
+    y: surfaceY(mask, Math.round(x)),
+    hp: 100,
+    angleDeg: 45,
+    power: 0,
+    selectedItemId: "shot-1",
+    accumulatedDelay: 0,
+    ssHitCharge: 0,
+    facing: -1,
+    ready: false,
+    passive: true,
+    displayName: "DUMMY",
+    connected: true,
+  };
 }
 
 /**
@@ -97,10 +178,66 @@ export const createRoom = mutation({
     mode: v.string(),
   },
   handler: async (ctx, { name, mode }) => {
-    await requireIdentity(ctx);
+    const accountId = await requireIdentity(ctx);
 
-    // TODO(plan 05): if (mode === "training") → seat caller + spawnDummy +
-    // startTurn (start-with-1). The open-room path below is the multiplayer flow.
+    const mask = TerrainMask.fromMap(MAP);
+
+    // TRAINING branch (plan 05 — fills the plan-04 seam, ports `MatchRoom`
+    // onCreate+onJoin training fork). A training room is a 1-occupant LIVE match:
+    // seat the caller, spawn the passive dummy, and start the turn IMMEDIATELY
+    // (start-with-1 — bypasses the ready handshake, `shouldStartImmediately`).
+    if (mode === "training") {
+      // start-with-1 gate (the SAME predicate the server training branch reads).
+      if (!shouldStartImmediately(true, 1)) {
+        throw new Error("training must start-with-1");
+      }
+      const displayName = await resolveDisplayName(ctx, accountId);
+      // Team-0 (left) single human seat from the spawn layout.
+      const seat = spawnLayout(mask, teamSizeForMode("training"))[0];
+      const human: LiveMobile = {
+        mobileId: crypto.randomUUID(),
+        accountId, // PRIVATE — server-set; stripped on read (R2).
+        team: 0,
+        x: seat.x,
+        y: seat.y,
+        hp: DEFAULT_HP,
+        angleDeg: 45,
+        power: 0,
+        selectedItemId: "shot-1",
+        accumulatedDelay: 0,
+        ssHitCharge: 0,
+        facing: 1,
+        ready: false,
+        passive: false,
+        displayName,
+        connected: true,
+      };
+
+      // Seat the dummy SYNCHRONOUSLY BEFORE startTurn so advanceTurn sees BOTH
+      // mobiles (dummy passive) and returns the human (Pitfall 1 ordering).
+      const matchId = await ctx.db.insert("matches", {
+        status: "active",
+        mode,
+        name,
+        phase: "TURN_START",
+        activeMobileId: "",
+        wind: 0,
+        turnEndsAt: 0,
+        turnSeq: 0,
+        winnerTeam: -1,
+        terrainVersion: 0,
+        mobiles: [human, spawnDummy(mask)],
+      });
+      await ctx.db.insert("matchTerrain", {
+        matchId,
+        version: 0,
+        rle: exactBytes(encodeMaskRLE(mask)),
+      });
+
+      // Start the turn via the REAL internal mutation (plan 05 full impl).
+      await ctx.runMutation(internal.match_internal.startTurn, { matchId });
+      return matchId;
+    }
 
     const matchId = await ctx.db.insert("matches", {
       status: "open",
@@ -118,7 +255,6 @@ export const createRoom = mutation({
 
     // One-shot RLE terrain snapshot, kept OFF the reactive `matches` doc
     // (D-11/D1). Slice to exact bytes for the `v.bytes()` round-trip (Pitfall 5).
-    const mask = TerrainMask.fromMap(MAP);
     await ctx.db.insert("matchTerrain", {
       matchId,
       version: 0,
@@ -277,6 +413,316 @@ export const selectItem = mutation({
       i === idx ? { ...m, selectedItemId: itemId } : m,
     );
     await ctx.db.patch(matchId, { mobiles });
+  },
+});
+
+/**
+ * Resolve a fired shot — THE CORE AUTHORITY (NET-01). Ports `MatchRoom.onFire`
+ * (652-689) + `resolveActiveShot` (871-980) ALMOST line-for-line, with the three
+ * Convex deltas (terrain decode/re-encode, lastShot patch, scheduler.runAfter).
+ *
+ * EVERY outcome is re-derived from `@shared/sim` `runServerShot` INSIDE this
+ * mutation — the client NEVER decides an outcome. The caller's `mobileId` is
+ * resolved SERVER-SIDE off `mobiles[]` by the verified subject (D-08); a
+ * client-sent id is never trusted. An out-of-turn / wrong-phase / unarmed fire is
+ * a NO-OP (`shouldResolveFire` false), never a throw.
+ *
+ * [M] lastShot.path storage decision (Q4 / planner's discretion): the FULL
+ * `lastShot.path` is stored on the live `matches` doc for v0. It is bounded by the
+ * sim's `maxSteps = 2000` (ballistics.ts), so ~tens of KB/shot.
+ *   MONITORING TRIGGER → switch to the client-re-simulate fallback (keep only
+ *   `impact`/`carves`/`damage` authoritative on the doc and redraw the arc
+ *   client-side from `{origin, angle, power, wind}`) IF a `matches` doc write ever
+ *   exceeds ~100 KB OR Convex bandwidth/subscription cost on the doc surfaces in
+ *   billing for typical 2v2/4v4 play. Documented defer, NOT a silent omission.
+ *
+ * [Q] OCC contention (document): concurrent writers to the same `matches` doc
+ * (e.g. a late `toggleReady` racing this `fireShot`) can trigger a Convex OCC
+ * retry. This is ACCEPTABLE for v0 — turn-based play serializes naturally and the
+ * retry is transparent. No extra control is added; this is the documented
+ * expectation.
+ */
+export const fireShot = mutation({
+  args: {
+    matchId: v.id("matches"),
+    angleDeg: v.number(),
+    power: v.number(),
+    itemId: v.string(),
+  },
+  handler: async (ctx, { matchId, angleDeg, power, itemId }) => {
+    const accountId = await requireIdentity(ctx);
+    const match = await ctx.db.get(matchId);
+    if (!match) throw new Error("match not found");
+
+    // Resolve the caller's mobile SERVER-SIDE off mobiles[] (never trust a
+    // client-sent id — D-08). A non-member or a passive seat cannot fire.
+    const idx = match.mobiles.findIndex((m) => m.accountId === accountId);
+    if (idx === -1) return; // not a member — no-op.
+    const active = match.mobiles[idx];
+
+    const isTraining = match.mode === "training";
+
+    // SINGLE fire-acceptance gate (NET-02 + Trojan-arm). Out-of-turn / wrong-phase
+    // / unarmed Trojan → no-op (the SAME predicate the server `onFire` reads).
+    const ok = shouldResolveFire({
+      phase: match.phase,
+      senderId: active.mobileId,
+      activePlayer: match.activeMobileId,
+      itemId,
+      ssHitCharge: active.ssHitCharge,
+      ssHitsToArm: SS_HITS_TO_ARM,
+    });
+    if (!ok) return;
+
+    // AIM-01 authoritative clamp at the single shot-resolution seam — re-derive
+    // the angle from the FIRING mobile's facing (server state, never client input).
+    const facing: 1 | -1 = active.facing === -1 ? -1 : 1;
+    const clampedAngle = clampAbsoluteAngle(angleDeg, facing);
+    const def: ProjectileDef = LOADOUT[itemId as keyof typeof LOADOUT];
+
+    // Read the authoritative terrain mask from `matchTerrain`, decode it (wrap the
+    // stored bytes to a fresh Uint8Array first — Pitfall 5 read side). runServerShot
+    // MUTATES this mask in place (carves), so we re-encode the SAME object after.
+    const terrainRow = await ctx.db
+      .query("matchTerrain")
+      .withIndex("by_match", (q) => q.eq("matchId", matchId))
+      .unique();
+    if (!terrainRow) throw new Error("terrain missing");
+    const terrain = decodeMaskRLE(toUint8Array(terrainRow.rle));
+
+    // Map mobiles[] → ServerMech[] for the pure resolver (mechId === mobileId).
+    const mechs: ServerMech[] = match.mobiles.map((m) => ({
+      id: m.mobileId,
+      x: m.x,
+      y: m.y,
+      hp: m.hp,
+    }));
+
+    // Launch origin = the SHARED barrel tip (matches the client aim preview).
+    const origin = muzzleOffset(active.x, active.y, clampedAngle);
+    const aim: ShotInput = {
+      x: origin.x,
+      y: origin.y,
+      angleDeg: clampedAngle,
+      power,
+      wind: match.wind,
+      gravity: GRAVITY,
+      projectile: def,
+    };
+
+    const result = runServerShot(aim, def, terrain, mechs);
+
+    // Build the next mobiles[] from the resolved mechs + settle. We copy the array
+    // and rewrite each mobile's hp/y; the active mobile also accumulates delay +
+    // ticks SS-charge + records the clamped angle/power/item it actually fired.
+    const mechById = new Map(mechs.map((m) => [m.id, m]));
+    const ssAfter =
+      def.id === "trojan"
+        ? 0
+        : result.damage.length > 0
+          ? Math.min(SS_HITS_TO_ARM, active.ssHitCharge + 1)
+          : active.ssHitCharge;
+
+    const mobiles = match.mobiles.map((m) => {
+      const mech = mechById.get(m.mobileId);
+      // HP write-back honors applyTrainingHpWriteBack: in training the firing
+      // player's OWN hp is NEVER written down (invincible); the dummy's IS.
+      const hp =
+        mech && applyTrainingHpWriteBack(isTraining, m.mobileId, active.mobileId)
+          ? mech.hp
+          : m.hp;
+      // Settle every mobile onto the POST-CARVE surface (drop-only, no fall damage).
+      const y = settledY(m.y, surfaceY(terrain, Math.round(m.x)));
+      if (m.mobileId === active.mobileId) {
+        return {
+          ...m,
+          hp,
+          y,
+          angleDeg: clampedAngle,
+          power,
+          selectedItemId: itemId,
+          ssHitCharge: ssAfter,
+          accumulatedDelay: m.accumulatedDelay + def.turnDelay,
+        };
+      }
+      return { ...m, hp, y };
+    });
+
+    // Re-encode the carved mask back to `matchTerrain` (slice to exact bytes —
+    // Pitfall 5 store side) + bump the version mirror (D-11/R7).
+    const nextTerrainVersion = match.terrainVersion + 1;
+    await ctx.db.patch(terrainRow._id, {
+      version: nextTerrainVersion,
+      rle: exactBytes(encodeMaskRLE(terrain)),
+    });
+
+    // S5b (TR-7 / T-08-10): in training, filter the firing player's OWN self-damage
+    // out of the broadcast `damage` so no self-damage FX renders client-side
+    // (the schema hp write-back already protected the player above) — the dummy's
+    // damage stays visible.
+    const fxDamage = isTraining
+      ? result.damage.filter((d) => d.mechId !== active.mobileId)
+      : result.damage;
+
+    const shotSeq = (match.lastShot?.seq ?? 0) + 1;
+
+    await ctx.db.patch(matchId, {
+      phase: "RESOLVING",
+      turnEndsAt: 0,
+      terrainVersion: nextTerrainVersion,
+      mobiles,
+      lastShot: {
+        seq: shotSeq,
+        byMobileId: active.mobileId,
+        path: result.path,
+        impact: result.impact,
+        carves: result.carves,
+        damage: fxDamage,
+      },
+    });
+
+    // Hold RESOLVING for the shot's flight + settle beat, then resolve the turn.
+    // The dwell mirrors the client flight timing from the SAME path length.
+    await ctx.scheduler.runAfter(
+      resolveDwellMs(result.path.length),
+      internal.match_internal.afterResolve,
+      { matchId, shotSeq },
+    );
+  },
+});
+
+/**
+ * Training-only RANGE RESET (S7 / TR-5). Ports `MatchRoom.onResetRange`
+ * (1078-1086): INERT in a real match (early-return on non-training), else rebuild
+ * the terrain wholesale (bump version), respawn the dummy, wipe the player's shot
+ * state, and re-enter a clean turn via `startTurn`. There is no pending-timer
+ * cancel to port — the staleness guard (turnSeq/shotSeq bump in `startTurn`)
+ * no-ops any pending scheduled function (D3).
+ */
+export const resetRange = mutation({
+  args: { matchId: v.id("matches") },
+  handler: async (ctx, { matchId }) => {
+    const accountId = await requireIdentity(ctx);
+    const match = await ctx.db.get(matchId);
+    if (!match) throw new Error("match not found");
+    if (match.mode !== "training") return; // inert outside training (T-08-03).
+
+    // Membership: only a seated caller can reset their own range.
+    if (!match.mobiles.some((m) => m.accountId === accountId)) {
+      throw new Error("not a member");
+    }
+
+    // Rebuild terrain wholesale from MAP (clears craters client-side on the
+    // version jump). Re-encode + bump the version mirror.
+    const mask = TerrainMask.fromMap(MAP);
+    const nextTerrainVersion = match.terrainVersion + 1;
+    const terrainRow = await ctx.db
+      .query("matchTerrain")
+      .withIndex("by_match", (q) => q.eq("matchId", matchId))
+      .unique();
+    if (terrainRow) {
+      await ctx.db.patch(terrainRow._id, {
+        version: nextTerrainVersion,
+        rle: exactBytes(encodeMaskRLE(mask)),
+      });
+    }
+
+    // Respawn the dummy at a NEW varied x + wipe the human's shot state (incl.
+    // ssHitCharge — manual RESET only, via the SHARED resetPlayerShotStateOn).
+    const mobiles = match.mobiles
+      .filter((m) => m.mobileId !== DUMMY_ID)
+      .map((m) => {
+        if (m.passive) return m;
+        const next = { ...m };
+        resetPlayerShotStateOn(next);
+        return next;
+      });
+    mobiles.push(spawnDummy(mask));
+
+    await ctx.db.patch(matchId, { mobiles, terrainVersion: nextTerrainVersion });
+
+    // Re-enter a clean turn (rolls wind once, picks the human, re-arms the dwell).
+    await ctx.runMutation(internal.match_internal.startTurn, { matchId });
+  },
+});
+
+/**
+ * Consented LEAVE (RECON-04 / Blocker 2/5). Ports `MatchRoom.removeAndForfeit`
+ * (563-648) MINUS all reconnection-window plumbing (D9 — Convex has no seat; a
+ * returning client just re-subscribes). Strips the caller's mobile; in a LIVE
+ * REAL match records `abandon_loss` (granular `${roomId}:abandon:${accountId}`)
+ * and resolves the team-elim via `forfeitOutcome`, then advances or ends.
+ *
+ * A training leave writes NO result (T-08-05); a not-in-progress (WAITING /
+ * RESULTS) leave just strips the seat. Idempotent: a caller already stripped is a
+ * no-op.
+ */
+export const leaveMatch = mutation({
+  args: { matchId: v.id("matches") },
+  handler: async (ctx, { matchId }) => {
+    const accountId = await requireIdentity(ctx);
+    const match = await ctx.db.get(matchId);
+    if (!match) throw new Error("match not found");
+
+    const leaver = match.mobiles.find((m) => m.accountId === accountId);
+    if (!leaver) return; // idempotency guard — already stripped / never seated.
+
+    const isTraining = match.mode === "training";
+    const wasInProgress =
+      match.phase !== "RESULTS" && match.phase !== "WAITING";
+    const wasActive = leaver.mobileId === match.activeMobileId;
+
+    // Decide the team-elim outcome with the PURE helper BEFORE mutating, against
+    // the turn view (mobileId is the turn-machine sessionId here).
+    const view = match.mobiles.map((m) =>
+      toTurnMobile({
+        sessionId: m.mobileId,
+        team: m.team,
+        hp: m.hp,
+        accumulatedDelay: m.accumulatedDelay,
+        passive: m.passive,
+      }),
+    );
+    const { outcome } = forfeitOutcome(view, leaver.mobileId);
+
+    // Strip the caller's mobile.
+    const mobiles = match.mobiles.filter((m) => m.mobileId !== leaver.mobileId);
+    await ctx.db.patch(matchId, {
+      mobiles,
+      // Clear a stale active slot if the leaver was active (startTurn re-picks).
+      ...(wasActive ? { activeMobileId: "" } : {}),
+    });
+
+    // Training leave records NO result and ends nothing (T-08-05).
+    if (isTraining) return;
+
+    // Record the abandon-loss for a live real match with a bound accountId.
+    if (wasInProgress) {
+      await ctx.runMutation(api.accounts.recordResult, {
+        authUserId: accountId,
+        outcome: "abandon_loss",
+        resultId: `${matchId}:abandon:${accountId}`,
+      });
+      // Mark the durable match row "abandoned" (first-terminal-wins).
+      await ctx.runMutation(api.matchDurability.recordEnd, {
+        roomId: matchId,
+        status: "abandoned",
+        winnerTeam: outcome.kind === "winner" ? outcome.team : undefined,
+      });
+    }
+
+    // Apply the team-elim / turn-advance outcome.
+    if (outcome.kind === "winner") {
+      await ctx.runMutation(internal.match_internal.endMatch, {
+        matchId,
+        winnerTeam: outcome.team,
+      });
+    } else if (outcome.kind === "draw") {
+      await ctx.runMutation(internal.match_internal.endMatchDraw, { matchId });
+    } else if (wasActive) {
+      // continue + the leaver was active → advance the turn.
+      await ctx.runMutation(internal.match_internal.startTurn, { matchId });
+    }
   },
 });
 
