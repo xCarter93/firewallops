@@ -380,6 +380,7 @@ function startPresenceHeartbeat(matchId: string): () => void {
 export function subscribeMatch(
   matchId: string,
   handlers: ConvexNetHandlers,
+  opts?: { presence?: boolean; terrain?: boolean },
 ): () => void {
   const client = getConvexClient();
   let lastSeenShotSeq = -1;
@@ -397,7 +398,11 @@ export function subscribeMatch(
   let terrainPull: Promise<void> = Promise.resolve();
 
   // D-05: start emitting presence heartbeats for this match (EMIT only — [R]).
-  const stopPresence = startPresenceHeartbeat(matchId);
+  // A read-only secondary subscriber (e.g. play.ts's DOM-HUD feed) passes
+  // presence:false so it never opens a second heartbeat session for the same seat —
+  // the scene's primary subscription owns the single heartbeat.
+  const stopPresence =
+    opts?.presence === false ? () => {} : startPresenceHeartbeat(matchId);
 
   const unsub = client.onUpdate(
     api.match.get,
@@ -435,15 +440,19 @@ export function subscribeMatch(
       const ver = doc.terrainVersion ?? 0;
       if (ver !== lastSeenTerrainVersion) {
         lastSeenTerrainVersion = ver;
-        terrainPull = terrainPull.then(async () => {
-          try {
-            const snap = await getTerrain(matchId);
-            // A pull queued before teardown must not call into a torn-down scene.
-            if (snap && !disposed) handlers.onTerrainSnapshot(snap);
-          } catch (err) {
-            console.error("[convex] getTerrain failed", err);
-          }
-        });
+        // A read-only secondary subscriber passes terrain:false to skip the pull —
+        // the scene's primary subscription owns the single terrain fetch.
+        if (opts?.terrain !== false) {
+          terrainPull = terrainPull.then(async () => {
+            try {
+              const snap = await getTerrain(matchId);
+              // A pull queued before teardown must not call into a torn-down scene.
+              if (snap && !disposed) handlers.onTerrainSnapshot(snap);
+            } catch (err) {
+              console.error("[convex] getTerrain failed", err);
+            }
+          });
+        }
       }
 
       // Terminal RESULTS → the match-end banner (winnerTeam -1 ⇒ draw). Fire once.

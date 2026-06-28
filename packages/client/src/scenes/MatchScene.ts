@@ -444,19 +444,11 @@ export class MatchScene extends Phaser.Scene {
   private createNetworked(): void {
     this.aimView = new AimView(this);
     this.fx = new Fx(this);
-
-    // Resolve the route BEFORE building the HUD. A provided Convex matchId means the
-    // state source is the Convex subscription and play.ts mounts NO DOM HUD overlay
-    // (that overlay is Colyseus-room-bound). So on the Convex route the Phaser HUD
-    // MUST render (domHud:false) — otherwise BOTH HUDs are suppressed and nothing
-    // (wind / power / turn list) shows. The Colyseus path keeps the DOM overlay +
-    // the suppressed Phaser HUD (DOM_HUD default ON; VITE_DOM_HUD=0 forces Phaser).
-    const providedConvexMatchId = takeProvidedConvexMatch();
-
-    // Up to 8 mobiles (team scope) — pre-create that many HUD turn rows.
-    this.hud = new Hud(this, ["", "", "", "", "", "", "", ""], {
-      domHud: providedConvexMatchId ? false : DOM_HUD,
-    });
+    // Up to 8 mobiles (team scope) — pre-create that many HUD turn rows. The DOM
+    // overlay mounts in play.ts for BOTH networked paths (Colyseus AND Convex), so
+    // suppress the Phaser HUD when DOM_HUD is on (default ON; VITE_DOM_HUD=0 falls
+    // back to the in-canvas Phaser HUD and play.ts mounts no overlay).
+    this.hud = new Hud(this, ["", "", "", "", "", "", "", ""], { domHud: DOM_HUD });
 
     this.mechViews = {};
     this.mechs = [];
@@ -501,6 +493,7 @@ export class MatchScene extends Phaser.Scene {
     // Convex `fireShot` mutation carries the committed angle/power/itemId, so the server
     // re-derives the outcome with no streamed aim. Return early so the Colyseus
     // adopt/connect path is never entered on the training route.
+    const providedConvexMatchId = takeProvidedConvexMatch();
     if (providedConvexMatchId) {
       this.bindConvexMatch(providedConvexMatchId, handlers);
       return;

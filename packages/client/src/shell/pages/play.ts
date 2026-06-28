@@ -430,11 +430,32 @@ export function renderPlay(
     root.appendChild(container);
 
     // Hand the matchId to the next MatchScene boot — the scene's createNetworked()
-    // peeks/takes it and drives off the Convex subscription (no Colyseus room). The
-    // DOM HUD reads room.state on the Colyseus path; the Convex HUD is the Phaser HUD
-    // (MatchScene keeps it when no DOM overlay mounts). We do NOT mount the room-bound
-    // DOM HUD overlay here (it requires a Colyseus Room).
+    // peeks/takes it and drives off the Convex subscription (no Colyseus room).
     provideConvexMatch(matchId);
+
+    // ── Phase-6 DOM HUD overlay on the Convex route ─────────────────────────────
+    // Mount the SAME polished DOM overlay the Colyseus path uses (gated by DOM_HUD)
+    // and drive it with bindHudToRoom — but reading a Convex-backed room-like adapter
+    // ({ state, sessionId }) instead of a Colyseus Room. The presence-free /
+    // terrain-free `feedHandlers` subscription below keeps the adapter current; the
+    // SCENE's own subscription owns the single presence heartbeat + terrain pulls, so
+    // this read-only feed must not double either. `state` is the convexDocToSyncedState
+    // output (a SyncedLike); `sessionId` is the caller's localMobileId.
+    const hudRoom: { state: unknown; sessionId: string } = {
+      state: {
+        mobiles: undefined,
+        phase: "",
+        activePlayer: "",
+        wind: 0,
+        turnEndsAt: 0,
+        winnerTeam: -1,
+      },
+      sessionId: "",
+    };
+    if (DOM_HUD) {
+      overlay = mountHudOverlay(container);
+      stopHudRaf = bindHudToRoom(hudRoom, overlay, () => disposed);
+    }
 
     // EXIT cluster (top-right) — present for BOTH modes. The RESET RANGE button is
     // added to this cluster + the TRAINING label only if training is detected below.
@@ -541,19 +562,27 @@ export function renderPlay(
       track(() => window.removeEventListener("keydown", onTrainKey));
     };
 
-    // Short-lived INDEPENDENT subscription to classify training-vs-multiplayer from
-    // the synced doc (the passive dummy). This is a SEPARATE convexClient.subscribeMatch
-    // handle (not the scene's convexMatchSession one), so it never clobbers the scene's
-    // render subscription. It DISPOSES ITSELF on the FIRST doc that carries any mobiles
-    // (training → mount the chrome; multiplayer → just dispose), so it never lingers and
-    // never drives repeated terrain pulls for the whole match. Also torn down on cleanup.
+    // PERSISTENT presence-free / terrain-free subscription that BOTH (a) keeps the DOM
+    // HUD adapter current (hudRoom.state/sessionId → the bindHudToRoom rAF above) and
+    // (b) classifies training-vs-multiplayer ONCE (mount the TRAINING/RESET chrome on
+    // the first doc carrying a passive dummy). It is a SEPARATE handle from the scene's
+    // convexMatchSession subscription, so it never clobbers the scene's render path;
+    // presence:false + terrain:false because the scene's subscription owns the single
+    // heartbeat + terrain fetch — this read-only mirror must not double either.
     let probeDone = false;
-    const probeHandlers: ConvexNetHandlers = {
+    const feedHandlers: ConvexNetHandlers = {
       onShotResult: () => {},
       onTerrainSnapshot: () => {},
       onMatchEnded: () => {},
+      onLocalIdentity: (id) => {
+        hudRoom.sessionId = id; // the local seat id buildViewModel needs.
+      },
       onStateChange: (s) => {
-        if (disposed || probeDone) return;
+        if (disposed) return;
+        hudRoom.state = s; // drives the DOM HUD (the bindHudToRoom rAF reads this).
+        // Training classification (once): mount the TRAINING/RESET chrome on the first
+        // doc that carries a passive dummy.
+        if (probeDone) return;
         const state = s as {
           mobiles?: {
             size?: number;
@@ -569,11 +598,13 @@ export function renderPlay(
         });
         probeDone = true;
         if (hasDummy) mountTrainingChrome();
-        probeUnsub(); // classification done (training or multiplayer) — stop probing.
       },
     };
-    const probeUnsub = convexSubscribeMatch(matchId, probeHandlers);
-    track(() => probeUnsub());
+    const feedUnsub = convexSubscribeMatch(matchId, feedHandlers, {
+      presence: false,
+      terrain: false,
+    });
+    track(() => feedUnsub());
 
     void (async () => {
       const Phaser = (await import("phaser")).default;
