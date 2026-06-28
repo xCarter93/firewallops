@@ -12,6 +12,8 @@
     "./schema": "./convex/schema.ts"
   },
   "dependencies": {
-    "convex": "1.41.0"
+    "@shared/sim": "workspace:*",
+    "convex": "1.41.0",
+    "zod": "4.4.3"
   }
 }
