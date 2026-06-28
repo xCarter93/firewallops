@@ -230,6 +230,16 @@ export function renderLobby(
     whiteSpace: "nowrap",
   } satisfies Partial<CSSStyleDeclaration>);
   handleEl.textContent = "—";
+  // Click the handle to change it later — the prompt copy promises this (AUTH-04).
+  // Opens the same prompt prefilled, in cancelable "change" mode (vs the blocking
+  // first-login gate). Skips the placeholder/error sentinels when seeding.
+  handleEl.style.cursor = "pointer";
+  handleEl.title = "Click to change your handle";
+  handleEl.addEventListener("click", () => {
+    const current = handleEl.textContent ?? "";
+    const seed = current === "—" || current === "AGENT" ? "" : current;
+    openHandlePrompt({ change: true, current: seed });
+  });
 
   // ILLUSTRATIVE: rank tier (no backend) — labelled SYS chrome.
   const rankEl = el("div", "fw-hub-rank");
@@ -896,9 +906,14 @@ export function renderLobby(
   }
 
   // ── first-login handle prompt (AUTH-04) ───────────────────────────────────
-  function openHandlePrompt(): void {
+  function openHandlePrompt(
+    opts: { change?: boolean; current?: string } = {},
+  ): void {
+    const isChange = opts.change === true;
     const overlay = modalOverlay();
-    overlay.dataset.blocking = "true";
+    // First-login BLOCKS lobby use until a handle is set (no cancel); a later
+    // "change" from the sidebar is cancelable, so only gate the first-login path.
+    if (!isChange) overlay.dataset.blocking = "true";
     const card = modalCard();
 
     const title = el("h3", "fw-modal-title");
@@ -924,6 +939,8 @@ export function renderLobby(
       "This is the call-sign other agents see. You can change it later.";
 
     const input = textInput("HANDLE");
+    // Change mode prefills the current handle so it can be edited in place.
+    if (isChange && opts.current) input.value = opts.current;
 
     const err = el("div", "fw-modal-err");
     Object.assign(err.style, {
@@ -936,7 +953,10 @@ export function renderLobby(
     const confirm = el("button", "fw-btn-primary");
     confirm.type = "button";
     confirm.textContent = "CONFIRM HANDLE"; // exact copy.
-    Object.assign(confirm.style, { width: "100%", justifyContent: "center" });
+    Object.assign(confirm.style, {
+      width: isChange ? "auto" : "100%",
+      justifyContent: "center",
+    });
     confirm.addEventListener("click", () => {
       void (async () => {
         const handle = input.value.trim();
@@ -959,7 +979,22 @@ export function renderLobby(
       })();
     });
 
-    card.append(title, bodyText, input, err, confirm);
+    if (isChange) {
+      // Cancelable layout: CANCEL backs out without changing the handle.
+      const actions = el("div", "fw-modal-actions");
+      Object.assign(actions.style, {
+        display: "flex",
+        gap: "var(--space-sm)",
+        justifyContent: "flex-end",
+        marginTop: "var(--space-sm)",
+      } satisfies Partial<CSSStyleDeclaration>);
+      const cancel = ghostButton("CANCEL");
+      cancel.addEventListener("click", () => overlay.remove());
+      actions.append(cancel, confirm);
+      card.append(title, bodyText, input, err, actions);
+    } else {
+      card.append(title, bodyText, input, err, confirm);
+    }
     overlay.appendChild(card);
     root.appendChild(overlay);
     input.focus();
