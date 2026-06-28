@@ -12,9 +12,11 @@
     "./schema": "./convex/schema.ts"
   },
   "dependencies": {
+    "@convex-dev/presence": "0.3.1",
     "@shared/sim": "workspace:*",
     "@firewallops/match-core": "workspace:*",
     "convex": "1.41.0",
+    "svix": "1.96.0",
     "zod": "4.4.3"
   },
   "devDependencies": {

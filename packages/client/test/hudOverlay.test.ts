@@ -201,8 +201,8 @@ describe("hudOverlay — UI-03 HP-tick pulse (phase-gated, concern 5)", () => {
   });
 });
 
-describe("hudOverlay — CF-1 RECONNECTING (non-numeric, concern 2)", () => {
-  it("renders a non-numeric RECONNECTING state with no countdown for a disconnected row", () => {
+describe("hudOverlay — CF-1 AWAY/OFFLINE (non-numeric, concern 2; D-06)", () => {
+  it("renders a non-numeric AWAY state with no countdown for a disconnected row", () => {
     const { container, handle } = mount();
     handle.update(vmFixture({ turnRows: [row("a", { connected: false })] }));
 
@@ -210,7 +210,8 @@ describe("hudOverlay — CF-1 RECONNECTING (non-numeric, concern 2)", () => {
     const tag = a?.querySelector<HTMLElement>(".fw-hud-row-reconnecting");
     expect(tag).not.toBeNull();
     expect(tag?.style.display).not.toBe("none");
-    expect(a?.textContent).toContain("RECONNECTING");
+    // D-06: the Convex model has no reconnection window, so the cue reads AWAY.
+    expect(a?.textContent).toContain("AWAY");
     // No fabricated numeric seconds countdown on the row.
     expect(a?.textContent ?? "").not.toMatch(/0:\d/);
 

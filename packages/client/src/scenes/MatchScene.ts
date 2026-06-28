@@ -37,7 +37,10 @@ import {
   hasProvidedConvexMatch,
   fireShot as convexFireShot,
   selectItem as convexSelectItem,
+  updateAim as convexUpdateAim,
+  subscribeAim as convexSubscribeAim,
   type ConvexNetHandlers,
+  type AimTelegraph,
 } from "../net/convexClient.js";
 import { convexMatchSession } from "../shell/net/matchSession.js";
 import type { Room } from "@colyseus/sdk";
@@ -92,6 +95,13 @@ const SHAKE_PER_DAMAGE = 0.0006; // shake amplitude per HP of total damage
 
 // --- Networked aim streaming (Phase 3) ---
 const AIM_THROTTLE_MS = 100; // max one aim message per ~100ms (Suggestion #8)
+// --- Convex live-aim telegraph (Plan 10) ---
+// The Convex `updateAim` emitter runs DELIBERATELY SLOWER than the Colyseus
+// ~100ms cadence: ≤5 Hz (≥200ms) AND only when the angle moved past a coarse
+// threshold (the server also coarse-quantizes to whole degrees + delta-gates the
+// write). Cosmetic-only, droppable (09-RESEARCH D-01). NEVER reuse AIM_THROTTLE_MS.
+const CONVEX_AIM_THROTTLE_MS = 200; // ≤5 Hz emission cap.
+const CONVEX_AIM_DELTA_DEG = 1; // emit only past a ≥1° absolute-angle move.
 // Local mirror of the server TURN_MS (server config.ts). Used ONLY for the
 // minimal countdown anchor — the server is the real timeout authority. Drift of
 // ~RTT is acceptable this phase (no server-time offset; CONTEXT minimal-countdown).
@@ -201,6 +211,11 @@ export class MatchScene extends Phaser.Scene {
    */
   private convexMatchId?: string;
   /**
+   * [Plan 10] The live opponent-aim telegraph disposer (`subscribeAim`), torn down
+   * on scene SHUTDOWN alongside the match subscription. Cosmetic-only.
+   */
+  private convexAimUnsub?: () => void;
+  /**
    * The LOCAL player's own seat id used for ALL input gating
    * (`isLocalActiveAndAiming`, the per-mobile `id === this.sessionId` branches in
    * syncFromState, the local MechView lookup). Named `sessionId` for historical
@@ -221,6 +236,14 @@ export class MatchScene extends Phaser.Scene {
   private activePlayerId = "";
   private isAnimatingShot = false;
   private lastAimSentAt = 0;
+  /**
+   * [Convex live-aim, plan 10] The last ABSOLUTE angle EMITTED to the Convex
+   * `updateAim` telegraph, for the client-side delta-gate (emit only when the aim
+   * moved past CONVEX_AIM_DELTA_DEG). -Infinity forces the first emit. Distinct
+   * from `lastAimSentAt` (which the Colyseus path also uses for its ~100ms cadence)
+   * because the Convex emitter runs at a SLOWER ≤5 Hz cadence + a delta gate.
+   */
+  private lastAimSentAngle = Number.NEGATIVE_INFINITY;
   // Latest synced absolute HP per sessionId (the authoritative reconcile source).
   private syncedHp: Record<string, number> = {};
   // Latest synced absolute Y per sessionId — the authoritative settle target,
@@ -550,12 +573,33 @@ export class MatchScene extends Phaser.Scene {
         this.setLocalMobileId(localMobileId),
     });
 
+    // [Plan 10] OPPONENT-AIM TELEGRAPH (cosmetic-only). With the Colyseus aim
+    // stream gone, the synced `matches` doc only carries an opponent's angle on a
+    // FIRE — so the opponent barrel would otherwise sit frozen between turns. Feed
+    // the live `matchAim` telegraph into the EXISTING interpolation callsite
+    // (`setBarrelAngleTarget`, the same one syncFromState drives for spectated
+    // mechs) so the opponent barrel glides to the telegraphed angle. We SKIP our
+    // own seat (the local barrel is driven from local input) so an echo of our own
+    // aim never fights the immediate local render. NEVER gates fire (authority
+    // reads only fireShot's payload); dropping this leaves the loop untouched.
+    this.convexAimUnsub = convexSubscribeAim(
+      matchId,
+      (aim: AimTelegraph | null) => {
+        if (this.disposed || !aim) return;
+        if (aim.mobileId === this.sessionId) return; // our own aim — local render owns it.
+        this.mechViews[aim.mobileId]?.setBarrelAngleTarget(aim.angleDeg);
+      },
+    );
+
     // Drop the live subscription when the scene shuts down (the Convex analog of the
     // Colyseus disposeMatchHandlers — no seat to keep, so unsubscribe and stop the
     // reactive feed; a fresh /play mount re-subscribes). This does NOT call
     // `leaveMatch` — leaving is the EXIT control's job (play.ts → leaveCurrent).
     this.events.once(Phaser.Scenes.Events.SHUTDOWN, () => {
       convexMatchSession.unsubscribe();
+      // Tear down the cosmetic aim telegraph alongside the match subscription.
+      this.convexAimUnsub?.();
+      this.convexAimUnsub = undefined;
     });
   }
 
@@ -1060,6 +1104,24 @@ export class MatchScene extends Phaser.Scene {
       if (now - this.lastAimSentAt >= AIM_THROTTLE_MS && this.room) {
         sendAim(this.room, absAngle, this.power, false);
         this.lastAimSentAt = now;
+      }
+
+      // [Plan 10] Convex opponent-aim telegraph (cosmetic-only). On the pure-Convex
+      // path (no this.room) emit the LOCAL active player's absolute angle through
+      // the throttled `updateAim` mutation — DELIBERATELY SLOWER than the Colyseus
+      // cadence: ≤5 Hz (≥200ms) AND only when the angle moved past CONVEX_AIM_DELTA_DEG
+      // (≥1°). The server also coarse-quantizes + delta-gates the write, so a held
+      // aim costs zero writes (T-09-20). Fire-and-forget; it NEVER gates fire.
+      if (
+        this.convexMatchId &&
+        now - this.lastAimSentAt >= CONVEX_AIM_THROTTLE_MS &&
+        Math.abs(absAngle - this.lastAimSentAngle) >= CONVEX_AIM_DELTA_DEG
+      ) {
+        this.lastAimSentAt = now;
+        this.lastAimSentAngle = absAngle;
+        void convexUpdateAim(this.convexMatchId, absAngle).catch(
+          (err: unknown) => console.error("[convex] updateAim failed", err),
+        );
       }
     } else {
       // Not our turn / mid-animation: clear the local aim overlays so no ghost

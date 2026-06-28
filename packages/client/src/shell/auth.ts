@@ -29,35 +29,14 @@ import { setConvexAuth } from "../net/convexClient.js";
  *   clerk.signOut(): Promise<void>
  * `appearance.variables` themes the prebuilt components to the UI-SPEC palette.
  *
- * REST base (review MEDIUM): `SERVER_HTTP_URL` resolves the DISTINCT HTTPS base
- * for the Meta-API (`/internal/profile`), separate from the `wss://` game-server
- * URL in net/room.ts. Profile reads/writes (plan 07+) attach the Clerk token as a
- * Bearer header to this base.
+ * META-API (plan 09-11, review [A1]): the profile read/write Meta-API has MOVED to
+ * authed Convex (`accounts.getMyProfile`/`setMyDisplayName`). The old REST base
+ * `SERVER_HTTP_URL` / `resolveServerHttpUrl` is therefore GONE here — its last
+ * reader (the lobby/overlays profile callsites) was repointed to Convex. The
+ * `VITE_SERVER_HTTP_URL` env typing is removed in plan 12's env cleanup (this plan
+ * just removed the last CODE reader). `getToken` below stays — it is still the
+ * Colyseus join token the /play page passes until the plan-12 cutover.
  */
-
-/**
- * The HTTPS base for the REST Meta-API (`/internal/profile`). DISTINCT from
- * `VITE_SERVER_URL` (the `wss://` WS URL the Colyseus `Client` uses): the Meta-API
- * is plain HTTPS, the game server is WS. A PRODUCTION build with a missing/empty
- * `VITE_SERVER_HTTP_URL` throws loudly (mirroring `resolveServerUrl` in net/room.ts
- * — no silent localhost in prod); DEV falls back to `http://localhost:2567`.
- */
-function resolveServerHttpUrl(): string {
-  const envUrl = import.meta.env.VITE_SERVER_HTTP_URL;
-  if (import.meta.env.PROD && (envUrl === undefined || envUrl.trim() === "")) {
-    throw new Error(
-      "VITE_SERVER_HTTP_URL is required for a production build (the deployed " +
-        "https:// Meta-API base for /internal/profile). It is DISTINCT from " +
-        "VITE_SERVER_URL (the wss:// WS URL). Refusing to fall back to " +
-        "http://localhost:2567 in production. Set VITE_SERVER_HTTP_URL in the " +
-        "Vercel build env.",
-    );
-  }
-  return envUrl ?? "http://localhost:2567";
-}
-
-/** The distinct REST base for the Meta-API (`/internal/profile`). */
-export const SERVER_HTTP_URL = resolveServerHttpUrl();
 
 /**
  * sessionStorage key holding the intended destination an unauthenticated visitor

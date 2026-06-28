@@ -1,4 +1,4 @@
-import { getToken, SERVER_HTTP_URL } from "../auth.js";
+import { setMyDisplayName as convexSetMyDisplayName } from "../../net/convexClient.js";
 
 /**
  * overlays.ts — reusable DOM overlays for the web-app shell (Phase 5, Plan 09),
@@ -8,9 +8,10 @@ import { getToken, SERVER_HTTP_URL } from "../auth.js";
  * canvas) — they never touch the canvas itself.
  *
  * Four families (all copy is VERBATIM from the UI-SPEC Copywriting Contract):
- *   1. HANDLE PROMPT     — first-login `CHOOSE YOUR HANDLE`; POSTs the display name
- *                          to the DISTINCT REST base `${SERVER_HTTP_URL}/internal/profile`
- *                          with the Clerk Bearer token → accounts.display_name.
+ *   1. HANDLE PROMPT     — first-login `CHOOSE YOUR HANDLE`; writes the display name
+ *                          via the authed Convex `accounts.setMyDisplayName` mutation
+ *                          (plan 09-11, review [A1]) → accounts.display_name. Identity
+ *                          is derived server-side from the verified subject (D-08).
  *   2. SHARE-LINK ERROR  — `ROOM FULL` / `ROOM NOT FOUND` / generic join failure →
  *                          `BROWSE ROOMS` drops to /lobby.
  *   3. RECONNECTION      — self-disconnect (`CONNECTION LOST` + countdown),
@@ -152,8 +153,8 @@ function secondaryButton(label: string): HTMLButtonElement {
 
 /**
  * Show the first-login handle prompt. Blocks app entry until a handle is set: the
- * `CONFIRM HANDLE` action POSTs `{ displayName }` to the DISTINCT REST base
- * `${SERVER_HTTP_URL}/internal/profile` with the Clerk Bearer token. On success it
+ * `CONFIRM HANDLE` action writes `{ displayName }` via the authed Convex
+ * `accounts.setMyDisplayName` mutation (plan 09-11, review [A1]). On success it
  * removes the overlay and calls `onDone(handle)`; on failure it surfaces an inline
  * error and stays open. Returns a remover so the caller can tear it down.
  */
@@ -210,18 +211,10 @@ export function showHandlePrompt(
     confirm.style.opacity = "0.6";
     errorLine.textContent = "";
     try {
-      const token = await getToken();
-      const res = await fetch(`${SERVER_HTTP_URL}/internal/profile`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          ...(token ? { Authorization: `Bearer ${token}` } : {}),
-        },
-        body: JSON.stringify({ displayName }),
-      });
-      if (!res.ok) {
-        throw new Error(`profile write failed: ${res.status}`);
-      }
+      // Plan 09-11 (review [A1]): write via the authed Convex mutation, NOT the
+      // old REST Meta-API Bearer POST. The accountId is derived server-side from
+      // the verified subject (D-08); throws on rejection.
+      await convexSetMyDisplayName(displayName);
       remove();
       onDone(displayName);
     } catch (e) {

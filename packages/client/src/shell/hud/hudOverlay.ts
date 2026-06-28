@@ -774,7 +774,8 @@ export function mountHudOverlay(
       fontWeight: "700",
     } satisfies Partial<CSSStyleDeclaration>);
     const reconnTag = el("span", "fw-hud-row-reconnecting");
-    reconnTag.textContent = "RECONNECTING…";
+    // D-06: no reconnection window on Convex — the cue means "tab away/offline".
+    reconnTag.textContent = "AWAY";
     Object.assign(reconnTag.style, {
       display: "none",
       fontFamily: FONT.mono,

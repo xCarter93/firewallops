@@ -8,7 +8,7 @@
  *
  * The fixture is hand-built to exercise EVERY render channel so the preview shows
  * each region populated: a local YOU row, an active row, an eliminated row, a
- * disconnected row (CF-1 RECONNECTING…), the round em-dash sentinel, a populated
+ * disconnected row (CF-1 / D-06 AWAY), the round em-dash sentinel, a populated
  * action bar (mid power, a selected chip, the trojan 2/3 locked state, the MOVE
  * dash), wind + minimap blips, and the AIMING countdown.
  *
@@ -61,7 +61,7 @@ export const PREVIEW_VM: HudViewModel = {
       hp: 21,
       isActive: false,
       eliminated: false,
-      connected: false, // CF-1 — previews the RECONNECTING… state
+      connected: false, // CF-1 / D-06 — previews the AWAY (disconnected) state
       team: 1,
     },
     {

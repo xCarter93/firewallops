@@ -1,8 +1,10 @@
-import { getToken, mountUserButton, SERVER_HTTP_URL } from "../auth.js";
+import { mountUserButton } from "../auth.js";
 import { convexMatchSession } from "../net/matchSession.js";
 import {
   createRoom as convexCreateRoom,
   joinMatch as convexJoinMatch,
+  getMyProfile as convexGetMyProfile,
+  setMyDisplayName as convexSetMyDisplayName,
 } from "../../net/convexClient.js";
 import {
   subscribeLobbyConvex,
@@ -34,8 +36,10 @@ import { FONT, chamfer, angledTab, edgeBar } from "../meshed.js";
  *     the matchId on `convexMatchSession` and navigate to `/room/:matchId`.
  *   - The TRAINING card (plan 07) is UNCHANGED — `convexCreateRoom("TRAINING",
  *     "training")` → straight to `/play/:matchId` (no /room staging).
- *   - The profile block + handle write hit the DISTINCT REST Meta-API
- *     (`SERVER_HTTP_URL` + `/internal/profile`) with the Clerk Bearer token.
+ *   - The profile block + handle write now run on CONVEX (plan 09-11, review [A1]):
+ *     `convexClient.getMyProfile()` / `convexClient.setMyDisplayName()` over the
+ *     authed ConvexClient (client.setAuth('convex'), plan 06) — NOT the old REST
+ *     Meta-API Bearer surface (which is gone at the plan-12 cutover).
  *   - LOG OUT is the mounted Clerk `UserButton` (AUTH-02).
  *
  * REAL vs ILLUSTRATIVE (founder policy): the seated player's profile DISPLAY NAME
@@ -52,7 +56,7 @@ import { FONT, chamfer, angledTab, edgeBar } from "../meshed.js";
  * here (the canvas-lifecycle smoke invariant).
  */
 
-/** The profile row shape returned by `GET /internal/profile` (Convex account row or null). */
+/** The profile row shape returned by `accounts.getMyProfile` (Convex account row or null). */
 interface ProfileRow {
   display_name?: string;
   wins?: number;
@@ -79,40 +83,24 @@ const inertConvexHandlers = {
 };
 
 /**
- * Read the player's profile (display name + W/L) over the DISTINCT REST base with
- * the Clerk Bearer token. Returns the row, or `null` if the account has no row /
+ * Read the player's profile (display name + W/L) over the AUTHED ConvexClient
+ * (plan 09-11, review [A1]). Returns the row, or `null` if the account has no row /
  * no display name yet (drives the first-login handle prompt). Throws on a network
- * / auth failure so the caller can show a retry affordance.
+ * / auth failure so the caller can show a retry affordance. The accountId is
+ * derived server-side from the verified subject (D-08) — no Bearer, no REST base.
  */
 async function fetchProfile(): Promise<ProfileRow | null> {
-  const token = await getToken();
-  const res = await fetch(`${SERVER_HTTP_URL}/internal/profile`, {
-    headers: { Authorization: `Bearer ${token ?? ""}` },
-  });
-  if (!res.ok) {
-    throw new Error(`profile read failed: ${res.status}`);
-  }
-  return (await res.json()) as ProfileRow | null;
+  return (await convexGetMyProfile()) as ProfileRow | null;
 }
 
 /**
- * Write the chosen handle to `accounts.display_name` via the Bearer POST
- * (AUTH-04). The accountId is derived server-side from the verified token `sub`,
- * never the body. Throws on a non-2xx so the modal can surface the failure.
+ * Write the chosen handle to `accounts.display_name` via the authed Convex
+ * mutation (AUTH-04, plan 09-11). The accountId is derived server-side from the
+ * verified subject, never the body (D-08). Throws on a server rejection so the
+ * modal can surface the failure.
  */
 async function saveHandle(displayName: string): Promise<void> {
-  const token = await getToken();
-  const res = await fetch(`${SERVER_HTTP_URL}/internal/profile`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${token ?? ""}`,
-    },
-    body: JSON.stringify({ displayName }),
-  });
-  if (!res.ok) {
-    throw new Error(`handle write failed: ${res.status}`);
-  }
+  await convexSetMyDisplayName(displayName);
 }
 
 /** Render the lobby into `root`. Returns a cleanup fn (tears down the subscription). */

@@ -241,6 +241,121 @@ export function hasProvidedConvexMatch(): boolean {
   return providedConvexMatchId !== null;
 }
 
+// ───────────────────────────── presence heartbeat (D-05, EMIT only) ─────────────────────────────
+//
+// The pure-Convex replacement for the deleted Colyseus socket-drop signal
+// (`onDrop`/`onReconnect`). The client's ONLY presence job is to EMIT its own
+// liveness for the active match — an interval heartbeat plus a tab-close beacon —
+// against the `@convex-dev/presence`-backed `api.presence.heartbeat`/`disconnect`
+// mutations (presence.ts). The server then re-derives `mobiles[].connected`
+// AUTHORITATIVELY onto the match doc ([R], presence.ts:reconcileConnected), so the
+// client NEVER merges presence into `convexDocToSyncedState`: `mobile.connected`
+// already arrives on the synced doc and flows through the UNCHANGED
+// `MatchScene` `view.setConnected(...)` binding. The per-user key (the seat
+// `mobileId`) is resolved SERVER-SIDE from the verified subject — the client never
+// names a mobileId, so it cannot heartbeat as another player (T-09-18).
+//
+// Heartbeat cadence is the component default (~5s, throttled — T-09-19); there are
+// no per-frame writes. The `sessionId` is a per-tab random id so two tabs of the
+// same account are distinct presence sessions (closing one does not mark the other
+// absent — the component unions a user's sessions).
+
+/** Heartbeat cadence (ms). Matches the @convex-dev/presence default (~5s, throttled). */
+const PRESENCE_HEARTBEAT_MS = 5000;
+
+/** A per-tab presence session id (distinguishes two tabs of the same account). */
+function newSessionId(): string {
+  try {
+    return crypto.randomUUID();
+  } catch {
+    return `s-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+  }
+}
+
+/**
+ * Start emitting presence heartbeats for `matchId` and wire the tab-close beacon.
+ * Returns a disposer that stops the interval and removes the lifecycle listeners.
+ * EMIT only — reads come off the authoritative synced doc ([R]).
+ *
+ * - interval heartbeat → `api.presence.heartbeat` (keeps the session present),
+ * - `visibilitychange:hidden` / `pagehide` → `api.presence.disconnect` so the
+ *   opponent sees AWAY immediately rather than waiting out the heartbeat timeout.
+ *
+ * A non-member heartbeat is a server-side no-op (presence.ts), so this is safe to
+ * start before the caller's seat is even known; the first patch with our
+ * `localMobileId` is irrelevant to emission (the server resolves our seat itself).
+ */
+function startPresenceHeartbeat(matchId: string): () => void {
+  const client = getConvexClient();
+  const sessionId = newSessionId();
+  let sessionToken = "";
+  let stopped = false;
+
+  const beat = (): void => {
+    if (stopped) return;
+    void client
+      .mutation(api.presence.heartbeat, {
+        matchId: matchId as unknown as never,
+        sessionId,
+        interval: PRESENCE_HEARTBEAT_MS,
+      })
+      .then((tokens) => {
+        const t = tokens as { sessionToken?: string } | undefined;
+        if (t?.sessionToken) sessionToken = t.sessionToken;
+      })
+      .catch((err: unknown) => {
+        console.error("[convex] presence heartbeat failed", err);
+      });
+  };
+
+  // Emit the explicit AWAY signal on tab-close/hide. `visibilitychange:hidden`
+  // fires reliably as the page is backgrounded (the case the founder tests on two
+  // devices); `pagehide` covers an actual unload. Both call `disconnect` so the
+  // opponent dims at once instead of waiting the heartbeat-timeout window.
+  const sendDisconnect = (): void => {
+    void client
+      .mutation(api.presence.disconnect, {
+        matchId: matchId as unknown as never,
+        sessionToken,
+      })
+      .catch(() => {
+        /* best-effort on teardown; the heartbeat timeout is the backstop. */
+      });
+  };
+
+  const onVisibility = (): void => {
+    if (typeof document !== "undefined" && document.visibilityState === "hidden") {
+      sendDisconnect();
+    } else {
+      // Returned to the tab → resume presence immediately (un-dim sooner).
+      beat();
+    }
+  };
+
+  beat(); // present at once on subscribe (don't wait a full interval).
+  const timer = setInterval(beat, PRESENCE_HEARTBEAT_MS) as unknown as number;
+  if (typeof document !== "undefined") {
+    document.addEventListener("visibilitychange", onVisibility);
+  }
+  if (typeof window !== "undefined") {
+    window.addEventListener("pagehide", sendDisconnect);
+  }
+
+  return () => {
+    stopped = true;
+    clearInterval(timer);
+    if (typeof document !== "undefined") {
+      document.removeEventListener("visibilitychange", onVisibility);
+    }
+    if (typeof window !== "undefined") {
+      window.removeEventListener("pagehide", sendDisconnect);
+    }
+    // Mark ourselves absent on an in-app unsubscribe (scene shutdown / leave) so
+    // the opponent does not wait out the heartbeat timeout when we navigate away.
+    sendDisconnect();
+  };
+}
+
 /**
  * Subscribe to the reactive match doc — the replacement for `room.onStateChange`.
  *
@@ -253,6 +368,11 @@ export function hasProvidedConvexMatch(): boolean {
  *  4. on a `terrainVersion` JUMP, pulls `api.match.getTerrain`, decodes the RLE via
  *     the byteOffset-safe `toUint8Array`, and fires `onTerrainSnapshot` (R7),
  *  5. on a terminal RESULTS doc, fires `onMatchEnded(winnerTeam, draw)`.
+ *
+ * It ALSO starts the presence heartbeat for the active match (D-05, EMIT only) and
+ * stops it in the returned disposer — so presence is bound exactly to the live
+ * subscription lifecycle (scene SHUTDOWN / leave both run the disposer). Reads of
+ * `connected` come off the authoritative synced doc, NOT from presence ([R]).
  *
  * Returns an unsubscribe disposer (called on scene SHUTDOWN). Staleness is tracked
  * per-subscription via the closed-over `lastSeenShotSeq` / `lastSeenTerrainVersion`.
@@ -268,6 +388,9 @@ export function subscribeMatch(
   let endedFired = false;
   // Serialize terrain pulls so a burst of version jumps doesn't race the decode.
   let terrainPull: Promise<void> = Promise.resolve();
+
+  // D-05: start emitting presence heartbeats for this match (EMIT only — [R]).
+  const stopPresence = startPresenceHeartbeat(matchId);
 
   const unsub = client.onUpdate(
     api.match.get,
@@ -316,7 +439,12 @@ export function subscribeMatch(
     },
   );
 
-  return unsub;
+  // Tear down BOTH the reactive subscription and the presence heartbeat together,
+  // so presence is bound exactly to the live subscription lifecycle (D-05).
+  return () => {
+    stopPresence();
+    unsub();
+  };
 }
 
 /**
@@ -350,6 +478,48 @@ export async function fireShot(
     power,
     itemId,
   });
+}
+
+/**
+ * Telegraph the LOCAL active player's barrel aim to the opponent (Plan 10) —
+ * cosmetic-only, fire-and-forget. Writes a SEPARATE throttled `matchAim` doc, NOT
+ * the reactive `matches` doc (R4). The server resolves the caller seat + clamps +
+ * delta-gates; the client throttles emission (≤5 Hz, delta-gated — see MatchScene).
+ * Live-aim NEVER gates fire; dropping it has zero authority impact (D-01/D-02).
+ */
+export async function updateAim(
+  matchId: string,
+  angleDeg: number,
+): Promise<void> {
+  await getConvexClient().mutation(api.matchAim.updateAim, {
+    matchId: matchId as unknown as never,
+    angleDeg,
+  });
+}
+
+/** The opponent-aim telegraph row `api.matchAim.get` returns (or null). */
+export interface AimTelegraph {
+  mobileId: string;
+  angleDeg: number;
+  seq: number;
+}
+
+/**
+ * Subscribe to the live opponent-aim telegraph for `matchId` (Plan 10). Fires `cb`
+ * on every `matchAim` patch with `{ mobileId, angleDeg, seq }` (or null until the
+ * first aim). The scene feeds `angleDeg` into the opponent barrel's existing
+ * `setBarrelAngleTarget` callsite (interpolated, cosmetic). Returns an unsubscribe
+ * disposer. Reads only — never an authority source.
+ */
+export function subscribeAim(
+  matchId: string,
+  cb: (aim: AimTelegraph | null) => void,
+): () => void {
+  return getConvexClient().onUpdate(
+    api.matchAim.get,
+    { matchId: matchId as unknown as never },
+    (raw) => cb(raw as AimTelegraph | null),
+  );
 }
 
 /** Tell the server the player's current weapon pick (NET-02). */
@@ -402,4 +572,49 @@ export async function leaveMatch(matchId: string): Promise<void> {
   await getConvexClient().mutation(api.match.leaveMatch, {
     matchId: matchId as unknown as never,
   });
+}
+
+// ─────────────────────── authed Meta-API wrappers (plan 09-11, [A1]) ───────────────────────
+// The pure-Convex replacement for the REST `${SERVER_HTTP_URL}/internal/profile` +
+// `/internal/loadout` reads/writes. Identity is derived server-side from the verified
+// subject via the existing `client.setAuth('convex')` wiring (shell/auth.ts, plan 06) —
+// NO Bearer header, NO SERVER_HTTP_URL. A caller can only ever read/write its OWN profile
+// (the server keys off getUserIdentity().subject — D-08; no id crosses the wire).
+
+/** The authed account row `api.accounts.getMyProfile` returns (or null). */
+export interface MyProfile {
+  display_name?: string;
+  wins?: number;
+  losses?: number;
+}
+
+/**
+ * Read the caller's own profile (display name + W/L). Returns the row, or `null`
+ * when the account has no row / no display name yet (drives the first-login handle
+ * prompt). Replaces `GET /internal/profile` — the accountId is the verified subject.
+ */
+export async function getMyProfile(): Promise<MyProfile | null> {
+  return (await getConvexClient().query(
+    api.accounts.getMyProfile,
+    {},
+  )) as MyProfile | null;
+}
+
+/**
+ * Write the caller's display handle to `accounts.display_name`. The accountId is
+ * derived server-side from the verified subject, never the body (D-08). Throws on a
+ * server rejection (empty/oversized handle) so the modal can surface the failure.
+ * Replaces `POST /internal/profile`.
+ */
+export async function setMyDisplayName(displayName: string): Promise<void> {
+  await getConvexClient().mutation(api.accounts.setMyDisplayName, {
+    displayName,
+  });
+}
+
+/** Read the caller's loadout defaults. Replaces `GET /internal/loadout/:accountId`. */
+export async function getLoadout(): Promise<{ items: string[] }> {
+  return (await getConvexClient().query(api.loadout.get, {})) as {
+    items: string[];
+  };
 }

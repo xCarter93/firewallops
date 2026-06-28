@@ -37,7 +37,8 @@ vi.mock("../src/game-config.js", () => ({ GAME_CONFIG: { parent: "game-container
 let signedIn = true;
 vi.mock("../src/shell/auth.js", () => ({
   RETURN_TO_KEY: "fwops:returnTo",
-  SERVER_HTTP_URL: "http://localhost:2567",
+  // SERVER_HTTP_URL removed (plan 09-11, [A1]) — auth.ts no longer exports it; the
+  // profile read/write moved to convexClient (mocked below).
   isSignedIn: () => signedIn,
   requireAuth: () => signedIn, // gate passes when signed in
   openSignIn: vi.fn(),
@@ -46,6 +47,27 @@ vi.mock("../src/shell/auth.js", () => ({
   getToken: async () => "smoke-token",
   mountUserButton: vi.fn(),
   initAuth: async () => {},
+}));
+
+// ── convexClient: profile read/write now runs on Convex (plan 09-11, [A1]) ───
+// The lobby's loadProfile() calls convexClient.getMyProfile() on render (the old
+// REST profile fetch is gone). Mock the module so the
+// profile resolves WITHOUT a real ConvexClient (no VITE_CONVEX_URL / network).
+// A populated display_name keeps the first-login handle prompt closed so the DOM
+// assertions stay clean. getMyProfile reads `profileStub` so per-test cases can
+// vary the W/L (the UI-04-partial assertion below). The room-create/join wrappers
+// the lobby also imports are stubbed inert (they only fire on a user click).
+let profileStub: { display_name: string; wins: number; losses: number } = {
+  display_name: "SMOKE",
+  wins: 0,
+  losses: 0,
+};
+vi.mock("../src/net/convexClient.js", () => ({
+  getMyProfile: vi.fn(async () => profileStub),
+  setMyDisplayName: vi.fn(async () => {}),
+  getLoadout: vi.fn(async () => ({ items: ["shot-1", "shot-2", "trojan"] })),
+  createRoom: vi.fn(async () => "ROOM1"),
+  joinMatch: vi.fn(async () => {}),
 }));
 
 // ── lobby's room-list subscription ───────────────────────────────────────────
@@ -129,11 +151,14 @@ describe("shell smoke", () => {
     gameCtor.mockClear();
     provideMatchRoom.mockClear();
     leaveCurrent.mockClear();
-    // The lobby reads the profile over REST; stub fetch so jsdom has no real
-    // network. A populated display_name keeps the first-login handle prompt closed
-    // so the DOM assertions stay clean.
+    // Plan 09-11 ([A1]): the lobby reads the profile via convexClient.getMyProfile()
+    // (mocked above), NOT a REST fetch. Reset the profile stub to the default so a
+    // populated display_name keeps the first-login handle prompt closed and the DOM
+    // assertions stay clean. global.fetch is still stubbed as an inert guard so any
+    // stray network call in jsdom fails closed rather than hitting the network.
+    profileStub = { display_name: "SMOKE", wins: 0, losses: 0 };
     global.fetch = vi.fn(async () =>
-      new Response(JSON.stringify({ display_name: "SMOKE", wins: 0, losses: 0 }), {
+      new Response("{}", {
         status: 200,
         headers: { "Content-Type": "application/json" },
       }),
@@ -183,18 +208,16 @@ describe("shell smoke", () => {
   });
 
   // ── UI-04 partial (Meshed Home Hub): the restyled lobby surfaces the player's
-  // REAL profile display name + W/L from the stubbed `/internal/profile` fetch.
-  // This is the Nyquist anchor proving the Meshed restyle did not sever the
-  // profile data path (handleEl/wlEl ← fetchProfile → loadProfile).
-  it("Home Hub surfaces the profile display name + W/L from the stubbed fetch (UI-04 partial)", async () => {
+  // REAL profile display name + W/L from the stubbed Convex getMyProfile read
+  // (plan 09-11, [A1]). This is the Nyquist anchor proving the Meshed restyle +
+  // the Convex repoint did not sever the profile data path (handleEl/wlEl ←
+  // fetchProfile → loadProfile).
+  it("Home Hub surfaces the profile display name + W/L from the stubbed Convex read (UI-04 partial)", async () => {
     // Vary the W/L from the beforeEach default so this asserts the LIVE wiring,
-    // not a hardcoded "W 0 · L 0" — the values must reflect THIS stub.
-    global.fetch = vi.fn(async () =>
-      new Response(
-        JSON.stringify({ display_name: "N1GHTW1RE", wins: 3, losses: 2 }),
-        { status: 200, headers: { "Content-Type": "application/json" } },
-      ),
-    ) as unknown as typeof fetch;
+    // not a hardcoded "W 0 · L 0" — the values must reflect THIS stub. Plan 09-11
+    // ([A1]): the profile now comes from convexClient.getMyProfile() (mocked above
+    // via profileStub), NOT a REST fetch.
+    profileStub = { display_name: "N1GHTW1RE", wins: 3, losses: 2 };
 
     const { startRouter, navigate } = await import("../src/shell/router.js");
     startRouter();

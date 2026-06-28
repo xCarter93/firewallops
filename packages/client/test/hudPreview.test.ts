@@ -105,9 +105,9 @@ describe("?hudpreview route", () => {
     // Round em-dash sentinel (the overlay renders round:-1 as "RND —").
     expect(text).toContain("RND");
     expect(text).toContain("—");
-    // CF-1 — the disconnected PREVIEW_VM row previews a non-numeric RECONNECTING…
-    // state (concern 2: no fabricated countdown).
-    expect(text).toContain("RECONNECTING");
+    // CF-1 — the disconnected PREVIEW_VM row previews a non-numeric AWAY state
+    // (concern 2: no fabricated countdown; D-06: no reconnection window on Convex).
+    expect(text).toContain("AWAY");
     // Identity — the local row's YOU badge (concern 7).
     expect(text).toContain("YOU");
   });

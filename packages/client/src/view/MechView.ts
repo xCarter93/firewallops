@@ -46,7 +46,9 @@ const TEAM_B = 0xdc2626; // red-600 — Team B
 const DISCONNECTED_ALPHA = 0.5; // mech body + barrel dim while reconnecting
 const BADGE_BG = 0x141e33; // slate surface (var(--surface)-equivalent)
 const BADGE_BORDER = 0x22d3ee; // cyan border (reserved status accent)
-const BADGE_TEXT = "RECONNECTING…"; // vector label, no emoji (repo no-emoji rule)
+// D-06: the Convex model has NO reconnection window, so the cue means "tab away/
+// offline", not "reconnecting". Copy is AWAY (was "RECONNECTING…").
+const BADGE_TEXT = "AWAY"; // vector label, no emoji (repo no-emoji rule)
 const BADGE_PAD_X = 8; // horizontal text inset inside the badge rect
 const BADGE_PAD_Y = 4; // vertical text inset inside the badge rect
 const BADGE_GAP = 6; // gap above the floating HP number
