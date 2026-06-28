@@ -160,10 +160,21 @@ export function renderRoom(
   back.addEventListener("click", () => {
     // A real back-to-lobby frees the seat — THE only leave from this page (the
     // `leaveMatch` mutation + unsubscribe). The room→play auto-advance never reaches
-    // here (it navigates directly without leaving).
-    void convexMatchSession.leaveCurrent();
-    cleanup();
-    navigate("/lobby");
+    // here (it navigates directly without leaving). AWAIT the leave before
+    // navigating so the seat is freed server-side before the lobby re-lists the
+    // room — otherwise the leaver can still appear seated. Guard double-clicks.
+    if (back.disabled) return;
+    back.disabled = true;
+    void (async () => {
+      try {
+        await convexMatchSession.leaveCurrent();
+      } catch (e) {
+        console.error("[room] leaveCurrent failed", e);
+      } finally {
+        cleanup();
+        navigate("/lobby");
+      }
+    })();
   });
 
   // Play glyph — a cyan triangle, illustrative chrome (no wiring).

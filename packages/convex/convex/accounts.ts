@@ -24,7 +24,7 @@
  * Every account read/write hits the existing `by_auth_user_id` index — no
  * full-table scan (Convex 32k-scan cap safe).
  */
-import { mutation, query } from "./_generated/server";
+import { mutation, query, type QueryCtx } from "./_generated/server";
 import { v } from "convex/values";
 
 /**
@@ -160,9 +160,7 @@ const MAX_DISPLAY_NAME_LEN = 24;
 // the underlying functions are unchanged.
 
 /** Reject when unauthenticated + return the verified Clerk subject (D-08/D-10). */
-async function requireSubject(ctx: {
-  auth: { getUserIdentity: () => Promise<{ subject: string } | null> };
-}): Promise<string> {
+async function requireSubject(ctx: QueryCtx): Promise<string> {
   const identity = await ctx.auth.getUserIdentity();
   if (!identity) throw new Error("unauthenticated");
   return identity.subject;

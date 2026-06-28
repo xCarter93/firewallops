@@ -539,6 +539,9 @@ export function renderLobby(
     // CUSTOM is the LIVE create-a-room path.
     modeCard("⬢", "var(--violet-2)", "CUSTOM", "Build a room", null, () => openCreateForm()),
   );
+  // Guard against a double-click on TRAINING creating two rooms (the create is
+  // async; a second click before it resolves would fire a second createRoom).
+  let trainingCreatePending = false;
   modeCards.appendChild(
     // TRAINING is the LIVE solo-range path — now on CONVEX (plan 07). It calls the
     // Convex `createRoom({mode:'training'})` mutation, which seats the caller, spawns
@@ -550,12 +553,15 @@ export function renderLobby(
     // manual getToken() pass is DROPPED (the Convex path authenticates via
     // client.setAuth('convex'), wired in shell/auth.ts plan 06).
     modeCard("◎", "var(--warn)", "TRAINING", "Solo range", null, () => {
+      if (trainingCreatePending) return; // double-click → no duplicate rooms.
+      trainingCreatePending = true;
       void (async () => {
         try {
           const matchId = await convexCreateRoom("TRAINING", "training");
           convexMatchSession.subscribe(matchId, inertConvexHandlers);
           go(`/play/${encodeURIComponent(matchId)}`);
         } catch (e) {
+          trainingCreatePending = false; // allow a retry after a failed create.
           console.error("[lobby] training create failed", e);
         }
       })();

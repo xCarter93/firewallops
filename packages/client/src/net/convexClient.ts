@@ -386,6 +386,13 @@ export function subscribeMatch(
   let lastSeenTerrainVersion = -1;
   let lastLocalId: string | null = null;
   let endedFired = false;
+  // First-snapshot guard: the initial doc after (re)subscribe may already carry a
+  // resolved lastShot (join / reconnect mid-match) — seed the baseline from it
+  // WITHOUT replaying that already-happened shot.
+  let initialized = false;
+  // Disposed guard: a terrain pull queued before teardown must not call back into a
+  // torn-down scene after the disposer runs.
+  let disposed = false;
   // Serialize terrain pulls so a burst of version jumps doesn't race the decode.
   let terrainPull: Promise<void> = Promise.resolve();
 
@@ -411,10 +418,17 @@ export function subscribeMatch(
       handlers.onStateChange(convexDocToSyncedState(doc));
 
       // lastShot.seq increment → the same animateShot entry as the old shotResult.
+      // The FIRST snapshot after (re)subscribe seeds the baseline without firing, so
+      // a join/reconnect into a match with an existing lastShot does NOT replay a
+      // shot that already resolved; only genuinely newer seqs animate.
       const shot = doc.lastShot;
-      if (shot && shot.seq !== lastSeenShotSeq) {
-        lastSeenShotSeq = shot.seq;
-        handlers.onShotResult(shot);
+      if (shot) {
+        if (!initialized) {
+          lastSeenShotSeq = shot.seq;
+        } else if (shot.seq !== lastSeenShotSeq) {
+          lastSeenShotSeq = shot.seq;
+          handlers.onShotResult(shot);
+        }
       }
 
       // terrainVersion jump → getTerrain → decodeMaskRLE → onTerrainSnapshot (R7).
@@ -424,7 +438,8 @@ export function subscribeMatch(
         terrainPull = terrainPull.then(async () => {
           try {
             const snap = await getTerrain(matchId);
-            if (snap) handlers.onTerrainSnapshot(snap);
+            // A pull queued before teardown must not call into a torn-down scene.
+            if (snap && !disposed) handlers.onTerrainSnapshot(snap);
           } catch (err) {
             console.error("[convex] getTerrain failed", err);
           }
@@ -436,12 +451,16 @@ export function subscribeMatch(
         endedFired = true;
         handlers.onMatchEnded(doc.winnerTeam, doc.winnerTeam < 0);
       }
+
+      // First snapshot fully processed — the shot baseline is now seeded.
+      initialized = true;
     },
   );
 
   // Tear down BOTH the reactive subscription and the presence heartbeat together,
   // so presence is bound exactly to the live subscription lifecycle (D-05).
   return () => {
+    disposed = true;
     stopPresence();
     unsub();
   };

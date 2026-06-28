@@ -158,6 +158,11 @@ export const enterAiming = internalMutation({
   handler: async (ctx, { matchId, turnSeq }) => {
     const match = await ctx.db.get(matchId);
     if (!match || match.turnSeq !== turnSeq) return; // STALE — no-op.
+    // Terminal/phase guard: enterAiming only advances a still-active TURN_START
+    // turn. A forfeit/leave can set RESULTS WITHOUT bumping turnSeq (endMatch), so
+    // without this the pending dwell would overwrite RESULTS back to AIMING and
+    // revive a finished match.
+    if (match.status !== "active" || match.phase !== "TURN_START") return;
 
     const isTraining = match.mode === "training";
     await ctx.db.patch(matchId, {
@@ -189,10 +194,12 @@ export const onTurnTimeout = internalMutation({
   handler: async (ctx, { matchId, turnSeq }) => {
     const match = await ctx.db.get(matchId);
     if (!match || match.turnSeq !== turnSeq) return; // STALE — already fired.
-    // Terminal guard: a forfeit/leave may have ended the match without advancing
-    // turnSeq (endMatch sets RESULTS but does not bump turnSeq). A pending timeout
-    // must NEVER revive a finished match.
-    if (match.phase === "RESULTS") return;
+    // Phase guard: only an ACTIVE, still-AIMING turn may be skipped. A fire that
+    // entered RESOLVING shares this turnSeq (startTurn bumps it only AFTER the
+    // resolve dwell), so without this a last-moment shot would be wrongly skipped
+    // mid-resolution; a forfeit/leave that set RESULTS (endMatch does not bump
+    // turnSeq) must never be revived. afterResolve owns the RESOLVING→next step.
+    if (match.status !== "active" || match.phase !== "AIMING") return;
 
     const mobiles = match.mobiles as LiveMobile[];
     const active = mobiles.find((m) => m.mobileId === match.activeMobileId);

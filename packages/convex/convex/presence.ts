@@ -46,6 +46,14 @@ import type { Id } from "./_generated/dataModel";
  */
 export const presence = new Presence(components.presence);
 
+// Server-owned bounds on the client-reported heartbeat cadence. The component
+// derives the offline timeout as ~2.5x this interval, so an unbounded client value
+// could keep a session "present" forever (or spam sub-second writes). The client
+// uses 5000ms (convexClient.PRESENCE_HEARTBEAT_MS); this band tolerates jitter
+// while capping the worst-case offline window.
+const MIN_HEARTBEAT_MS = 1000;
+const MAX_HEARTBEAT_MS = 15000;
+
 /** Reject + return the verified Clerk subject (mirrors match.ts:requireIdentity). */
 async function requireIdentity(ctx: MutationCtx): Promise<string> {
   const identity = await ctx.auth.getUserIdentity();
@@ -138,12 +146,20 @@ export const heartbeat = mutation({
     const mobileId = await callerMobileId(ctx, matchId, accountId);
     if (!mobileId) return { roomToken: "", sessionToken: "" };
 
+    // Clamp the client-reported cadence into the server-owned band so a malicious
+    // or buggy client cannot inflate the offline window (timeout ≈ 2.5x interval)
+    // and appear present forever, nor spam sub-second heartbeats.
+    const safeInterval = Math.min(
+      Math.max(interval, MIN_HEARTBEAT_MS),
+      MAX_HEARTBEAT_MS,
+    );
+
     const tokens = await presence.heartbeat(
       ctx,
       matchId,
       mobileId,
       sessionId,
-      interval,
+      safeInterval,
     );
     await reconcileConnected(ctx, matchId);
     return tokens;

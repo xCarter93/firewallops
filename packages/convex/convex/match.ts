@@ -21,7 +21,7 @@
  *     returned mobile (R2) and returns the caller's own `localMobileId` (review
  *     [I]) so the client learns its seat without `accountId` crossing the wire.
  */
-import { mutation, query } from "./_generated/server";
+import { mutation, query, type QueryCtx } from "./_generated/server";
 import { internal, api } from "./_generated/api";
 import { v } from "convex/values";
 import {
@@ -139,20 +139,18 @@ function spawnDummy(mask: TerrainMask): LiveMobile {
  * server-side. Falls back to "AGENT" when the account row has no name yet.
  */
 async function resolveDisplayName(
-  ctx: { db: { query: (t: "accounts") => any } },
+  ctx: QueryCtx,
   accountId: string,
 ): Promise<string> {
   const row = await ctx.db
     .query("accounts")
-    .withIndex("by_auth_user_id", (q: any) => q.eq("auth_user_id", accountId))
+    .withIndex("by_auth_user_id", (q) => q.eq("auth_user_id", accountId))
     .unique();
   return row?.display_name ?? "AGENT";
 }
 
 /** Reject + return the verified Clerk subject (D-10). */
-async function requireIdentity(ctx: {
-  auth: { getUserIdentity: () => Promise<{ subject: string } | null> };
-}): Promise<string> {
+async function requireIdentity(ctx: QueryCtx): Promise<string> {
   const identity = await ctx.auth.getUserIdentity();
   if (!identity) throw new Error("unauthenticated");
   return identity.subject;
@@ -179,6 +177,18 @@ export const createRoom = mutation({
   },
   handler: async (ctx, { name, mode }) => {
     const accountId = await requireIdentity(ctx);
+
+    // Reject unknown modes BEFORE persisting — `mode` is a client arg cast to
+    // MatchMode downstream (teamSizeForMode), so an unsupported value would corrupt
+    // the seat math. Allow-list mirrors the MatchMode union (match-core/config).
+    if (
+      mode !== "1v1" &&
+      mode !== "2v2" &&
+      mode !== "4v4" &&
+      mode !== "training"
+    ) {
+      throw new Error("invalid mode");
+    }
 
     const mask = TerrainMask.fromMap(MAP);
 
@@ -286,6 +296,14 @@ export const joinMatch = mutation({
     // Idempotency: a caller already seated does not double-join.
     if (match.mobiles.some((m) => m.accountId === accountId)) {
       return matchId;
+    }
+
+    // Joinability guard: only a WAITING lobby room accepts NEW seats. Without this
+    // a stranger could join an in-progress match whose roster dipped below full
+    // after a mid-match leave (seatsFull would read false) — corrupting live play.
+    // The idempotent already-seated return above still lets a member re-subscribe.
+    if (match.phase !== "WAITING") {
+      throw new Error("match not joinable");
     }
 
     // Overflow guard FIRST (Authority Decision 3) — a late join into a full room
@@ -478,6 +496,17 @@ export const fireShot = mutation({
     // the angle from the FIRING mobile's facing (server state, never client input).
     const facing: 1 | -1 = active.facing === -1 ? -1 : 1;
     const clampedAngle = clampAbsoluteAngle(angleDeg, facing);
+    // Authoritative power clamp — mirror the angle clamp. The client charges power
+    // in [0,100] (MatchScene); the server is the authority and never trusts the
+    // wire value, rejecting out-of-range / non-finite power.
+    const clampedPower = Number.isFinite(power)
+      ? Math.max(0, Math.min(100, power))
+      : 0;
+    // Validate the requested item is a real LOADOUT entry BEFORE use — the client
+    // controls this arg, and an unknown id would yield an undefined `def` and crash
+    // the pure resolver. An invalid item is a silent no-op (like an out-of-turn
+    // fire), never a throw.
+    if (!Object.prototype.hasOwnProperty.call(LOADOUT, itemId)) return;
     const def: ProjectileDef = LOADOUT[itemId as keyof typeof LOADOUT];
 
     // Read the authoritative terrain mask from `matchTerrain`, decode it (wrap the
@@ -504,7 +533,7 @@ export const fireShot = mutation({
       x: origin.x,
       y: origin.y,
       angleDeg: clampedAngle,
-      power,
+      power: clampedPower,
       wind: match.wind,
       gravity: GRAVITY,
       projectile: def,
@@ -539,7 +568,7 @@ export const fireShot = mutation({
           hp,
           y,
           angleDeg: clampedAngle,
-          power,
+          power: clampedPower,
           selectedItemId: itemId,
           ssHitCharge: ssAfter,
           accumulatedDelay: m.accumulatedDelay + def.turnDelay,
@@ -691,6 +720,18 @@ export const leaveMatch = mutation({
       mobiles,
       // Clear a stale active slot if the leaver was active (startTurn re-picks).
       ...(wasActive ? { activeMobileId: "" } : {}),
+      // A WAITING room that drops below full is joinable again — reset the lobby
+      // status so it does not stay locked as "full" after a pre-start leave.
+      ...(match.phase === "WAITING"
+        ? {
+            status: seatsFull(
+              mobiles.length,
+              teamSizeForMode(match.mode as MatchMode),
+            )
+              ? ("full" as const)
+              : ("open" as const),
+          }
+        : {}),
     });
 
     // Training leave records NO result and ends nothing (T-08-05).

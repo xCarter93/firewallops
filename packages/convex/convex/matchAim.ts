@@ -26,15 +26,13 @@
  * OWN payload and ignores `matchAim` entirely — there is no authority surface to
  * attack here. Cutting this whole file leaves the authority loop untouched.
  */
-import { mutation, query } from "./_generated/server";
+import { mutation, query, type QueryCtx } from "./_generated/server";
 import { v } from "convex/values";
 import { canFire } from "@firewallops/match-core";
 import { clampAbsoluteAngle } from "@shared/sim";
 
 /** Reject + return the verified Clerk subject (D-10) — mirrors `match.ts`. */
-async function requireIdentity(ctx: {
-  auth: { getUserIdentity: () => Promise<{ subject: string } | null> };
-}): Promise<string> {
+async function requireIdentity(ctx: QueryCtx): Promise<string> {
   const identity = await ctx.auth.getUserIdentity();
   if (!identity) throw new Error("unauthenticated");
   return identity.subject;
@@ -122,7 +120,12 @@ export const updateAim = mutation({
 export const get = query({
   args: { matchId: v.id("matches") },
   handler: async (ctx, { matchId }) => {
-    await requireIdentity(ctx);
+    const accountId = await requireIdentity(ctx);
+    // Membership gate (parity with match.get / getTerrain): only a seated player
+    // may read the live-aim telegraph — an authed non-member learns nothing.
+    const match = await ctx.db.get(matchId);
+    if (!match) return null;
+    if (!match.mobiles.some((m) => m.accountId === accountId)) return null;
     const row = await ctx.db
       .query("matchAim")
       .withIndex("by_match", (q) => q.eq("matchId", matchId))
