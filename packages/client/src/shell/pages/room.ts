@@ -1,29 +1,28 @@
-import type { Room } from "@colyseus/sdk";
-import { getToken } from "../auth.js";
-import type { NetHandlers } from "../../net/room.js";
-import { matchSession } from "../net/matchSession.js";
+import { convexMatchSession } from "../net/matchSession.js";
+import {
+  toggleReady as convexToggleReady,
+  type ConvexNetHandlers,
+} from "../../net/convexClient.js";
 import { chamfer, angledTab, edgeBar, circuitRail } from "../meshed.js";
 
 /**
  * Lobby Room / Ready page (Meshed "Lobby Room", UI-SPEC #5) — the pre-match
- * staging surface (Phase 5, Plan 08, LOBBY-04, Blocker 1 + Blocker 3), restyled
- * to the Meshed System foundation in Phase 6 (06-06, MESHED-C).
+ * staging surface, restyled to the Meshed System foundation in Phase 6 (06-06,
+ * MESHED-C). On CONVEX (Phase 9, plan 08) the page drives off the REACTIVE
+ * `api.match.get` subscription (`convexMatchSession.subscribe`); the lobby already
+ * seated the caller (the `createRoom`/`joinMatch` mutation) and stored the matchId
+ * on `convexMatchSession` before navigating here, so this page does NOT re-join — it
+ * just subscribes to the reactive doc and renders. The page visuals/copy are
+ * UNCHANGED from the Colyseus version; only the data wiring moved.
  *
- * The room page JOINS the WAITING MatchRoom through the SINGLE-OWNER
- * `matchSession.join` (Blocker 3) — never a fresh Colyseus `Client`. That is the
- * SAME connection the play page (plan 09) reuses by reading `matchSession.current`
- * WITHOUT re-joining and WITHOUT leaving, so `/room → /play` is one connection /
- * one seat. The ONLY leave is `matchSession.leaveCurrent()`, called solely when
- * the player truly backs out to the lobby (never on the room→play transition).
- *
- * What it renders off the joined room's synced state:
+ * What it renders off the reactive doc's synced state:
  *   - Two team columns of chamfered slot cards: a filled slot shows the PUBLIC
  *     `displayName` + a ready pip (green ready / red not-ready) + a YOU badge on
- *     the local seat; an empty slot is a dashed OPEN SLOT. Slots show
- *     `displayName` ONLY — never an account id (Blocker 1; no account id crosses
- *     the wire).
- *   - A per-player `✓ READY` toggle that sends `ready` / `unready` to the joined
- *     MatchRoom (the room handles auto-start; there is NO manual Start button).
+ *     the local seat (the caller's `localMobileId`, surfaced via onLocalIdentity);
+ *     an empty slot is a dashed OPEN SLOT. Slots show `displayName` ONLY — never an
+ *     account id (Blocker 1; accountId is stripped server-side, R2).
+ *   - A per-player `✓ READY` toggle that calls the `toggleReady` mutation (the
+ *     server handles auto-start via shouldAutoStart; there is NO manual Start button).
  *   - A room-config rail (mode + the single map option, display-only).
  *   - An auto-start STATUS LINE: STARTING WHEN ALL READY… when full + all ready,
  *     WAITING ON {N} AGENT(S) otherwise.
@@ -33,10 +32,17 @@ import { chamfer, angledTab, edgeBar, circuitRail } from "../meshed.js";
  * chrome — never presented as live state. Sourceless numerics use a muted "—".
  *
  * Entering `/play` happens automatically when the server flips `phase` out of
- * WAITING; the play page reads `matchSession.current` (Blocker 3).
+ * WAITING (server auto-start). The matchId is already on `convexMatchSession`, so the
+ * play page (plan 08) detects the Convex route and drives off the same subscription.
+ * BACK calls `convexMatchSession.leaveCurrent()` (the `leaveMatch` mutation +
+ * unsubscribe) — the ONLY place the match is left from this page.
  */
 
-/** The synced Mobile shape this page reads (server schema mirror, read-only). */
+/**
+ * The synced Mobile shape this page reads — a structural subset of the mapped
+ * `SyncedMobile` from convexDocToSyncedState (the mapper carries displayName + ready
+ * + connected through for exactly this page, plan 08).
+ */
 interface SyncedMobile {
   sessionId: string;
   team: number;
@@ -46,7 +52,7 @@ interface SyncedMobile {
   connected: boolean;
 }
 
-/** The synced MatchState shape this page reads (read-only mirror). */
+/** The synced MatchState shape this page reads (read-only mirror of the mapped state). */
 interface SyncedState {
   phase: string;
   mobiles: {
@@ -57,9 +63,9 @@ interface SyncedState {
 
 /**
  * Render the room page into `root`. Returns a cleanup fn. NOTE: cleanup does NOT
- * leave the match — that would break the room→play single-connection reuse
- * (Blocker 3). A real back-to-lobby is the explicit BACK control, which calls
- * `matchSession.leaveCurrent()` then navigates.
+ * leave the match — that would forfeit a seat on every nav within the match flow
+ * (room→play). A real back-to-lobby is the explicit BACK control, which calls
+ * `convexMatchSession.leaveCurrent()` then navigates.
  */
 export function renderRoom(
   root: HTMLElement,
@@ -68,9 +74,10 @@ export function renderRoom(
 ): () => void {
   root.innerHTML = "";
 
-  let room: Room | null = null;
   let disposed = false;
-  /** Our own sessionId once joined — used to drive the local READY toggle + YOU badge. */
+  /** True once the reactive subscription is live (enables the READY toggle). */
+  let subscribed = false;
+  /** Our own seat id (localMobileId) once known — drives the READY toggle + YOU badge. */
   let mySessionId = "";
   /** Local mirror of whether WE are ready (optimistic, reconciled by patches). */
   let iAmReady = false;
@@ -151,9 +158,10 @@ export function renderRoom(
     cursor: "pointer",
   } satisfies Partial<CSSStyleDeclaration>);
   back.addEventListener("click", () => {
-    // A real back-to-lobby frees the seat — THE only leave (Blocker 3). The
-    // room→play transition never reaches here.
-    void matchSession.leaveCurrent();
+    // A real back-to-lobby frees the seat — THE only leave from this page (the
+    // `leaveMatch` mutation + unsubscribe). The room→play auto-advance never reaches
+    // here (it navigates directly without leaving).
+    void convexMatchSession.leaveCurrent();
     cleanup();
     navigate("/lobby");
   });
@@ -635,17 +643,21 @@ export function renderRoom(
   readyBtn.disabled = true;
   styleReadyButton(readyBtn, false);
   readyBtn.addEventListener("click", () => {
-    if (!room) return;
-    // Toggle: send ready / unready to the joined MatchRoom (the room auto-starts
-    // when full + all ready — there is no manual master Start).
-    if (iAmReady) {
-      room.send("unready");
-      iAmReady = false;
-    } else {
-      room.send("ready");
-      iAmReady = true;
-    }
+    if (!subscribed) return;
+    // Toggle: call the Convex `toggleReady(matchId, ready)` mutation (the server
+    // auto-starts via shouldAutoStart when full + all ready — no manual master
+    // Start). Optimistic flip; the reactive doc patch reconciles the authoritative
+    // value back through renderState. Fire-and-forget; revert the optimistic flip if
+    // the mutation rejects (e.g. no longer WAITING).
+    const next = !iAmReady;
+    iAmReady = next;
     styleReadyButton(readyBtn, iAmReady);
+    void convexToggleReady(roomId, next).catch((e: unknown) => {
+      if (disposed) return;
+      iAmReady = !next; // revert the optimistic flip on rejection.
+      styleReadyButton(readyBtn, iAmReady);
+      console.error("[room] toggleReady failed", e);
+    });
   });
 
   footer.append(statusLine, readyBtn);
@@ -655,16 +667,13 @@ export function renderRoom(
 
   // ── render the slots + status off a synced patch ──────────────────────────
   function renderState(state: SyncedState): void {
-    // Auto-enter /play when the server flips phase out of WAITING (Blocker 3:
-    // the play page reuses matchSession.current — no re-join, no leave here).
+    // Auto-enter /play when the server flips phase out of WAITING (server auto-start
+    // via shouldAutoStart). The matchId is already on convexMatchSession, so the play
+    // page detects the Convex route and drives off the same subscription — no re-join.
     //
-    // GUARD the unsynced default: the @colyseus/schema CLIENT rebuilds state from
-    // reflection, where `phase` is UNSYNCED (undefined / "") UNTIL the first patch
-    // decodes — NOT the server's = "WAITING" TS initializer. renderState is called
-    // once synchronously right after join() (see below) — possibly BEFORE that
-    // first patch — so a "!== WAITING" guard sees undefined and flips a freshly
-    // CREATED room straight into /play. Use an ALLOWLIST of the real in-match
-    // phases instead: undefined, "", and "WAITING" all stay on the staging room.
+    // Use an ALLOWLIST of the real in-match phases (undefined, "", and "WAITING" all
+    // stay on the staging room) so an early/empty patch never flips a freshly CREATED
+    // WAITING room straight into /play.
     const inMatch =
       state.phase === "TURN_START" ||
       state.phase === "AIMING" ||
@@ -741,8 +750,14 @@ export function renderRoom(
     }
   }
 
-  // ── join the WAITING match through the single-owner matchSession (Blocker 3) ─
-  const handlers: NetHandlers = {
+  // ── subscribe to the WAITING match's reactive doc (Convex, plan 08) ──────────
+  // The lobby already seated the caller (createRoom/joinMatch) and stored the matchId
+  // on convexMatchSession, so this page does NOT re-join — it (re-)subscribes to the
+  // reactive `api.match.get` doc and renders. onLocalIdentity surfaces the caller's
+  // own seat id (localMobileId — the Convex replacement for room.sessionId) for the
+  // READY toggle + YOU badge. onStateChange delivers the mapped SyncedState (which the
+  // mapper carries displayName + ready + connected through for this page).
+  const handlers: ConvexNetHandlers = {
     onShotResult: () => {},
     onTerrainSnapshot: () => {},
     onMatchEnded: () => {},
@@ -750,29 +765,24 @@ export function renderRoom(
       if (disposed) return;
       renderState(s as SyncedState);
     },
+    onLocalIdentity: (localMobileId) => {
+      if (disposed) return;
+      mySessionId = localMobileId;
+    },
   };
 
-  void (async () => {
-    try {
-      const token = await getToken();
-      // matchSession.join is idempotent on the same room id — if we created this
-      // room from the lobby (already current) it reuses that connection / seat
-      // and does NOT open a second one (Blocker 3).
-      const joined = await matchSession.join(roomId, token ?? "", handlers);
-      if (disposed) return;
-      room = joined;
-      mySessionId = joined.sessionId;
-      readyBtn.disabled = false;
-      // If a patch already arrived before this assignment, render the current
-      // state immediately so the slots are not stuck on CONNECTING.
-      renderState(joined.state as unknown as SyncedState);
-    } catch (e) {
-      statusLine.textContent =
-        "COULD NOT JOIN — the room rejected the connection.";
-      statusLine.style.color = "var(--danger)";
-      console.error("[room] join failed", e);
-    }
-  })();
+  try {
+    // subscribe is idempotent on the same matchId — re-subscribing to the match we
+    // are already in (set by the lobby) re-binds these handlers (no seat, so cheap).
+    convexMatchSession.subscribe(roomId, handlers);
+    subscribed = true;
+    readyBtn.disabled = false;
+  } catch (e) {
+    statusLine.textContent =
+      "COULD NOT JOIN — the room rejected the connection.";
+    statusLine.style.color = "var(--danger)";
+    console.error("[room] subscribe failed", e);
+  }
 
   return cleanup;
 }

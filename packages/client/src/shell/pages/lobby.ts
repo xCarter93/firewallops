@@ -1,9 +1,11 @@
 import { getToken, mountUserButton, SERVER_HTTP_URL } from "../auth.js";
-import type { NetHandlers } from "../../net/room.js";
-import { matchSession, convexMatchSession } from "../net/matchSession.js";
-import { createRoom as convexCreateRoom } from "../../net/convexClient.js";
+import { convexMatchSession } from "../net/matchSession.js";
 import {
-  subscribeLobby,
+  createRoom as convexCreateRoom,
+  joinMatch as convexJoinMatch,
+} from "../../net/convexClient.js";
+import {
+  subscribeLobbyConvex,
   type LobbyRoomEntry,
   type LobbySubscription,
 } from "../net/lobbyClient.js";
@@ -18,15 +20,20 @@ import { FONT, chamfer, angledTab, edgeBar } from "../meshed.js";
  * HOME HUB": a left command sidebar, a center QUICK MATCH hero + mode cards + the
  * live ROOM BROWSER + an INTEL FEED, and a right SQUAD panel.
  *
- * LIVE WIRING — preserved byte-for-byte from the Phase-5 lobby (this is a
- * PRESENTATIONAL restyle wrapping the same logic; the lobby→staging→start flow
- * repaired in d726c39 is untouched):
- *   - The live room list comes from `subscribeLobby` (a SEPARATE light LobbyRoom
- *     connection — NOT a match seat). The ROOM BROWSER region reuses
- *     `renderRooms`/`renderRoomRow`/`renderEmptyState`.
- *   - CREATE ROOM / the QUICK MATCH hero DEPLOY CTA + the mode cards all route
- *     through the SAME `openCreateForm()` → `matchSession.create` (Blocker 3),
- *     then navigate to `/room/:id` (no new join path is invented).
+ * LIVE WIRING — the ROOM-BROWSER list + the create/join cards now run on CONVEX
+ * (Phase 9, plan 08). The page visuals/copy are unchanged; only the data wiring
+ * moved off Colyseus onto the Convex authority (the Colyseus `subscribeLobby`/
+ * `matchSession` halves are deleted at the plan-12 cutover):
+ *   - The live room list comes from the REACTIVE `api.lobby.listOpen` Convex query
+ *     (`subscribeLobbyConvex`) — NOT a match seat; it re-pushes on any open/full
+ *     room change. The ROOM BROWSER region reuses `renderRooms`/`renderRoomRow`/
+ *     `renderEmptyState` UNCHANGED (each listOpen row is mapped to LobbyRoomEntry).
+ *   - CREATE ROOM / the QUICK MATCH hero DEPLOY CTA + the CUSTOM card route through
+ *     `openCreateForm()` → `convexCreateRoom(name, mode)` (mode chosen at create);
+ *     a room-row JOIN routes through `convexClient.joinMatch(matchId)`. Both store
+ *     the matchId on `convexMatchSession` and navigate to `/room/:matchId`.
+ *   - The TRAINING card (plan 07) is UNCHANGED — `convexCreateRoom("TRAINING",
+ *     "training")` → straight to `/play/:matchId` (no /room staging).
  *   - The profile block + handle write hit the DISTINCT REST Meta-API
  *     (`SERVER_HTTP_URL` + `/internal/profile`) with the Clerk Bearer token.
  *   - LOG OUT is the mounted Clerk `UserButton` (AUTH-02).
@@ -57,22 +64,10 @@ const MODES = ["1v1", "2v2", "4v4"] as const;
 type Mode = (typeof MODES)[number];
 
 /**
- * Minimal net handlers for the CREATE-ROOM connection. The lobby only needs the
- * room CREATED on the single-owner matchSession; the real per-patch handlers are
- * supplied by the room page when it rejoins this same room idempotently (Blocker
- * 3). These are inert no-ops so creating a room never throws on an early patch.
- */
-const inertHandlers: NetHandlers = {
-  onShotResult: () => {},
-  onTerrainSnapshot: () => {},
-  onMatchEnded: () => {},
-  onStateChange: () => {},
-};
-
-/**
- * Inert Convex handlers for the TRAINING-card create (plan 07). The lobby only needs
- * the matchId subscribed on convexMatchSession so the play page detects the Convex
- * training route (currentMatchId === roomId); the REAL per-doc handlers are supplied
+ * Inert Convex handlers for the CUSTOM/RANKED create + the JOIN flow (plan 08) AND
+ * the TRAINING-card create (plan 07). The lobby only needs
+ * the matchId subscribed on convexMatchSession so the next page (room or play) detects
+ * the Convex route (currentMatchId === id); the REAL per-doc handlers are supplied
  * by MatchScene.bindConvexMatch when Phaser boots (convexMatchSession.subscribe
  * re-binds, tearing down this inert subscription). No-ops so an early doc patch is harmless.
  */
@@ -745,10 +740,25 @@ export function renderLobby(
     } satisfies Partial<CSSStyleDeclaration>);
     joinBtn.disabled = locked;
     if (!locked) {
-      // Join = navigate to the room page (it joins the MatchRoom via matchSession).
-      joinBtn.addEventListener("click", () =>
-        go(`/room/${encodeURIComponent(room.roomId)}`),
-      );
+      // Join (plan 08) — Convex: seat the caller via the `joinMatch` mutation
+      // (server derives identity from the verified subject + enforces capacity),
+      // store the matchId on convexMatchSession (so the room/play pages drive the
+      // Convex route), then navigate to the staging room. The roomId IS the Convex
+      // matchId (rowToEntry maps matchId → roomId in lobbyClient).
+      joinBtn.addEventListener("click", () => {
+        void (async () => {
+          joinBtn.disabled = true;
+          try {
+            const matchId = room.roomId;
+            await convexJoinMatch(matchId);
+            convexMatchSession.subscribe(matchId, inertConvexHandlers);
+            go(`/room/${encodeURIComponent(matchId)}`);
+          } catch (e) {
+            joinBtn.disabled = false;
+            console.error("[lobby] join failed", e);
+          }
+        })();
+      });
     }
 
     row.append(nameEl, modeEl, countEl, stateEl, joinBtn);
@@ -861,16 +871,20 @@ export function renderLobby(
         confirm.disabled = true;
         err.textContent = "";
         try {
-          const token = await getToken();
-          // CREATE ROOM goes THROUGH the single-owner matchSession (Blocker 3).
-          const room = await matchSession.create(
+          // CREATE ROOM (plan 08) — Convex: the `createRoom(name, mode)` mutation
+          // creates the WAITING match, seats the caller (room master), and sets the
+          // per-mode capacity (teamSizeForMode) server-side. It returns the new
+          // matchId. Mode (1v1/2v2/4v4) is chosen here at create time. Store the
+          // matchId on convexMatchSession so the room/play pages drive the Convex
+          // route, then navigate to the staging room. Auth is client.setAuth('convex')
+          // (plan 06) — no manual getToken() pass needed.
+          const matchId = await convexCreateRoom(
             nameInput.value.trim() || "NEW BREACH",
             selectedMode,
-            token ?? "",
-            inertHandlers,
           );
+          convexMatchSession.subscribe(matchId, inertConvexHandlers);
           overlay.remove();
-          go(`/room/${encodeURIComponent(room.roomId)}`);
+          go(`/room/${encodeURIComponent(matchId)}`);
         } catch (e) {
           confirm.disabled = false;
           err.textContent =
@@ -977,30 +991,29 @@ export function renderLobby(
   }
 
   // ── boot the page: subscribe to the live list + read the profile ───────────
-  void (async () => {
-    try {
-      const subscription = await subscribeLobby((rooms) => {
-        // If the page was torn down (nav-away) before/while a push arrived, close
-        // via the stored handle (assigned below once the subscription resolves)
-        // and skip the render. Referencing `sub` (not the local const) avoids a
-        // temporal-dead-zone self-reference.
-        if (disposed) {
-          sub?.close();
-          return;
-        }
-        renderRooms(rooms);
-      });
-      // If we were disposed during the await, close immediately — never store it.
+  // Plan 08: the room list is now the REACTIVE `api.lobby.listOpen` Convex query
+  // (subscribeLobbyConvex) — it re-pushes whenever any open/full room's
+  // status/roster/phase changes (no manual "+"/"-" folding). Unlike the Colyseus
+  // subscribeLobby this is SYNCHRONOUS (no join await); it returns the LobbySubscription
+  // handle directly, whose close() unsubscribes the query (no lobby seat to leave).
+  try {
+    const subscription = subscribeLobbyConvex((rooms) => {
+      // If the page was torn down (nav-away), unsubscribe and skip the render.
       if (disposed) {
         subscription.close();
         return;
       }
+      renderRooms(rooms);
+    });
+    if (disposed) {
+      subscription.close();
+    } else {
       sub = subscription;
-    } catch (e) {
-      renderRooms([]);
-      console.error("[lobby] room-list subscription failed", e);
     }
-  })();
+  } catch (e) {
+    renderRooms([]);
+    console.error("[lobby] room-list subscription failed", e);
+  }
   // Render the empty state immediately (replaced when the first push arrives).
   renderRooms([]);
   void loadProfile();

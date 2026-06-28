@@ -86,6 +86,19 @@ export interface SyncedMobile {
    * authority decision; threat T-08-09). Defaults `false` when absent on the doc.
    */
   passive: boolean;
+  /**
+   * The seat's PUBLIC handle (Blocker 1) — the only identity field that crosses the
+   * wire (accountId is stripped server-side, R2). Carried through so the staging-room
+   * page (room.ts, plan 08) can render the per-slot callsign off the reactive get
+   * subscription. Defaults "" when absent (MatchScene ignores it). Never an accountId.
+   */
+  displayName: string;
+  /**
+   * The seat's READY flag (plan 04). Carried through so the staging room (room.ts)
+   * can render the ready pip + auto-start status off the reactive get subscription.
+   * Defaults `false` when absent (MatchScene ignores it — it gates on phase/turn).
+   */
+  ready: boolean;
 }
 
 /**
@@ -128,6 +141,10 @@ function toSyncedMobile(m: ConvexMobile): SyncedMobile {
     // The training dummy flag — carried through so play.ts's training-detection rAF
     // (the synced `passive` dummy read) fires on the Convex route. Absent ⇒ false.
     passive: m.passive === true,
+    // PUBLIC handle + ready flag — carried for the staging room (room.ts, plan 08).
+    // MatchScene ignores both; absent ⇒ "" / false. accountId is NEVER carried (R2).
+    displayName: m.displayName ?? "",
+    ready: m.ready === true,
   };
 }
 

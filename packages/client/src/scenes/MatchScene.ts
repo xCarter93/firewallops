@@ -36,6 +36,7 @@ import {
   takeProvidedConvexMatch,
   hasProvidedConvexMatch,
   fireShot as convexFireShot,
+  selectItem as convexSelectItem,
   type ConvexNetHandlers,
 } from "../net/convexClient.js";
 import { convexMatchSession } from "../shell/net/matchSession.js";
@@ -1021,9 +1022,19 @@ export class MatchScene extends Phaser.Scene {
         }
       }
       // Send once per real selection change (the gate-rejected trojan leaves
-      // selectedShotId unchanged, so no stray send), and only after connect.
-      if (this.selectedShotId !== priorShotId && this.room) {
-        sendSelectItem(this.room, this.selectedShotId);
+      // selectedShotId unchanged, so no stray send), and only after connect. On the
+      // Convex path (no this.room) route the same NET-02 intent through the
+      // `selectItem` mutation so a multiplayer weapon switch reaches the authority
+      // (plan 08); the Colyseus path keeps sendSelectItem.
+      if (this.selectedShotId !== priorShotId) {
+        if (this.room) {
+          sendSelectItem(this.room, this.selectedShotId);
+        } else if (this.convexMatchId) {
+          void convexSelectItem(this.convexMatchId, this.selectedShotId).catch(
+            (err: unknown) =>
+              console.error("[convex] selectItem failed", err),
+          );
+        }
       }
 
       // Aim preview (local cosmetic, ONLY for the local active player). Drive the

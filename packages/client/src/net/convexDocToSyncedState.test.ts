@@ -34,6 +34,8 @@ function sampleDoc(): ConvexMatchDoc {
         accumulatedDelay: 0,
         selectedItemId: "shot-1",
         connected: true,
+        displayName: "GH0ST", // PUBLIC handle (plan 08 — carried for the staging room)
+        ready: true, // ready flag (plan 08 — carried for the staging room)
       },
       {
         mobileId: "mob-B",
@@ -129,5 +131,22 @@ describe("convexDocToSyncedState", () => {
     });
     expect(byId["mob-A"]).toBe(false); // no passive field on the doc → defaults false
     expect(byId["mob-B"]).toBe(true); // explicit passive:true → carried through
+  });
+
+  it("carries displayName + ready through for the staging room (plan 08)", () => {
+    // room.ts renders the per-slot callsign + ready pip + auto-start status off the
+    // reactive get subscription, so the mapper must carry the PUBLIC handle + ready
+    // flag (explicit values; absent → "" / false). accountId is NEVER present (R2).
+    const s = convexDocToSyncedState(sampleDoc());
+    const handles: Record<string, string> = {};
+    const readies: Record<string, boolean> = {};
+    s.mobiles.forEach((m) => {
+      handles[m.sessionId] = m.displayName;
+      readies[m.sessionId] = m.ready;
+    });
+    expect(handles["mob-A"]).toBe("GH0ST"); // explicit handle carried through
+    expect(handles["mob-B"]).toBe(""); // absent displayName → defaults ""
+    expect(readies["mob-A"]).toBe(true); // explicit ready:true carried through
+    expect(readies["mob-B"]).toBe(false); // absent ready → defaults false
   });
 });

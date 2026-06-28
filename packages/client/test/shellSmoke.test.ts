@@ -48,10 +48,18 @@ vi.mock("../src/shell/auth.js", () => ({
   initAuth: async () => {},
 }));
 
-// ── lobby's light LobbyRoom connection: an async no-op subscription ───────────
-// `subscribeLobby` is async and resolves to a `LobbySubscription` with `.close()`.
+// ── lobby's room-list subscription ───────────────────────────────────────────
+// Plan 08: the lobby page now renders the room list from the REACTIVE Convex query
+// via `subscribeLobbyConvex` (SYNCHRONOUS — returns a `LobbySubscription` with
+// `.close()` directly, no join await). The legacy async Colyseus `subscribeLobby`
+// is still exported (coexistence until plan 12) so we stub BOTH: the smoke only
+// exercises subscribeLobbyConvex now, with an empty initial room list.
 vi.mock("../src/shell/net/lobbyClient.js", () => ({
   subscribeLobby: vi.fn(async () => ({ close: vi.fn() })),
+  subscribeLobbyConvex: vi.fn((onRooms: (rooms: unknown[]) => void) => {
+    onRooms([]); // initial empty list — the lobby renders the empty state.
+    return { close: vi.fn() };
+  }),
 }));
 
 // ── matchSession: a fake single-owner room so /play reuses it (Blocker 3) ─────
@@ -80,9 +88,12 @@ vi.mock("../src/shell/net/matchSession.js", () => ({
     reconnect: vi.fn(async () => null),
     leaveCurrent,
   },
-  // Convex single-owner session (plan 09-06/07). For this smoke `currentMatchId`
-  // is null so /play/ROOM1 takes the (still-active) Colyseus reuse path — the
-  // Convex TRAINING branch (play.ts:696) is covered by the human-verify gate.
+  // Convex single-owner session (plan 09-06/07/08). For this smoke `currentMatchId`
+  // is null, so the play page's Convex gate (`currentMatchId === roomId`) is FALSE
+  // and /play/ROOM1 takes the (still-active) Colyseus reuse path — exactly the
+  // canvas-lifecycle invariant this smoke proves. Both the Convex TRAINING (plan 07)
+  // and Convex MULTIPLAYER (plan 08) branches share that single gate and are covered
+  // by the two-device human-verify gate, not this headless smoke.
   convexMatchSession: {
     get currentMatchId() {
       return null;
