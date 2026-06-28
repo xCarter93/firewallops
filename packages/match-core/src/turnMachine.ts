@@ -7,21 +7,29 @@
  * MatchController pattern). The Room is a thin adapter that maps its `Mobile`
  * schema entries onto `TurnMobile` and applies the returned decisions.
  *
- * PURITY: imports NOTHING from @colyseus/core or @colyseus/schema — it stays a
- * pure decision layer.
+ * PURITY: imports NOTHING from the realtime engine packages — it stays a pure
+ * decision layer (no @colyseus import; see the workspace lint seam).
+ *
+ * Phase 9 (D-02 timeout refactor): the timeout auto-fire helper and the
+ * power-commit flag on `TurnMobile` were REMOVED here. The turn-timeout path is
+ * now SKIP-ONLY — it never auto-fires a locked aim. The SKIP behavior (apply
+ * FORFEIT_DELAY, advance, fire nothing) is implemented at the authority level in
+ * the Convex onTurnTimeout mutation (plan 05); this pure layer no longer carries
+ * the auto-fire surface so it cannot be accidentally re-ported. This is the ONE
+ * intentional gameplay-behavior change in the migration (its human-verify
+ * surfacing is plan 08).
  */
 
 /**
  * The minimal per-mobile view the turn machine reads. The Room's `Mobile`
- * schema satisfies it structurally (sessionId/team/hp/accumulatedDelay/
- * powerLocked are all `@type()` fields).
+ * schema satisfies it structurally (sessionId/team/hp/accumulatedDelay are all
+ * `@type()` fields).
  */
 export interface TurnMobile {
   sessionId: string;
   team: number;
   hp: number;
   accumulatedDelay: number;
-  powerLocked: boolean;
   /**
    * Turn-EXCLUSION marker (Phase 8). When `true`, `advanceTurn` NEVER selects
    * this mobile — the server-spawned training dummy carries `passive: true` so it
@@ -42,13 +50,17 @@ export interface TurnMobile {
  * boundary test maps records through THIS function (the exact one the room uses),
  * so it catches a dropped-`passive` regression that a direct `advanceTurn` call
  * (with `passive` already set) would not.
+ *
+ * Phase 9 (D-02 timeout refactor): the power-commit flag is NO LONGER part of the
+ * produced `TurnMobile` view. The caller's `Mobile` schema entry — which still
+ * carries a synced commit flag — passes straight in as a variable (excess
+ * properties on a variable are not an error), so the mapping simply drops it.
  */
 export function toTurnMobile(m: {
   sessionId: string;
   team: number;
   hp: number;
   accumulatedDelay: number;
-  powerLocked: boolean;
   passive?: boolean;
 }): TurnMobile {
   return {
@@ -56,7 +68,6 @@ export function toTurnMobile(m: {
     team: m.team,
     hp: m.hp,
     accumulatedDelay: m.accumulatedDelay,
-    powerLocked: m.powerLocked,
     passive: m.passive,
   };
 }
@@ -185,7 +196,7 @@ export function shouldAutoStart(
  * whether the leaver was actually present (idempotency) and (b) the
  * post-removal team-elimination outcome. The Room is the SOLE mutator: it
  * deletes the mobile from the synced state and applies this decision; this
- * helper touches NO Colyseus state and imports NOTHING from @colyseus.
+ * helper touches NO engine state and imports NOTHING from the realtime engine.
  *
  * Returned `outcome`:
  *   - `{ kind: "winner", team }` — exactly one team still has a living mobile.
@@ -220,18 +231,6 @@ export function forfeitOutcome(
   const outcome: ForfeitOutcome =
     win.kind === "ongoing" ? { kind: "continue" } : win;
   return { removed: present, outcome };
-}
-
-/**
- * The turn-timeout decision (NET-04). If the active mobile has COMMITTED power
- * (`powerLocked`) the Room auto-fires its last streamed aim; otherwise the Room
- * SKIPS the turn and applies FORFEIT_DELAY. The FORFEIT_DELAY add stays in the
- * Room (it mutates schema), but this pure decision makes the branch testable.
- */
-export type TimeoutOutcome = { kind: "auto-fire" } | { kind: "skip" };
-
-export function timeoutOutcome(active: TurnMobile): TimeoutOutcome {
-  return active.powerLocked ? { kind: "auto-fire" } : { kind: "skip" };
 }
 
 /**
@@ -284,7 +283,7 @@ export function shouldResolveFire(args: {
 // `turnView` dropped-`passive` gap would have slipped through. Extracting the
 // decision into one pure function the Room calls closes that drift: the test and
 // production share one decision, not two copies. PURITY is preserved — these
-// import NOTHING from @colyseus and operate on plain records, not schema.
+// import NOTHING from the realtime engine and operate on plain records, not schema.
 
 /**
  * The lobby-publish gate (TR-8): a training room is NEVER published to the lobby.
@@ -341,10 +340,15 @@ export function shouldTrainingRespawn(dummyHp: number): boolean {
 
 /**
  * The manual-RESET-only player shot-state wipe (TR-5). MUTATES the passed record
- * back to a clean turn: SS charge cleared, default shot re-selected, power/lock/
- * delay zeroed, angle re-centered. A `Mobile` schema entry satisfies this
- * structurally, so the Room's `resetPlayerShotState()` passes the human mobile
- * straight in — the SAME function the test exercises on a plain record.
+ * back to a clean turn: SS charge cleared, default shot re-selected, power/delay
+ * zeroed, angle re-centered. A `Mobile` schema entry satisfies this structurally,
+ * so the Room's `resetPlayerShotState()` passes the human mobile straight in — the
+ * SAME function the test exercises on a plain record.
+ *
+ * Phase 9 (D-02 timeout refactor): this no longer touches the power-commit flag.
+ * The synced commit flag on the Mobile schema still exists, but it is reset at
+ * turn-start by the Room (`startTurn`), not by this RESET wipe; the timeout path no
+ * longer reads it (auto-fire removed), so this helper drops that reset entirely.
  *
  * CALL ONLY from the manual-RESET path. A kill-RESPAWN deliberately PRESERVES the
  * player's earned `ssHitCharge` (the respawn helper touches only the dummy +
@@ -354,14 +358,12 @@ export function resetPlayerShotStateOn(rec: {
   ssHitCharge: number;
   selectedItemId: string;
   power: number;
-  powerLocked: boolean;
   accumulatedDelay: number;
   angleDeg: number;
 }): void {
   rec.ssHitCharge = 0;
   rec.selectedItemId = "shot-1";
   rec.power = 0;
-  rec.powerLocked = false;
   rec.accumulatedDelay = 0;
   rec.angleDeg = 45;
 }

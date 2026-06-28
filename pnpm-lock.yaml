@@ -68,12 +68,24 @@ importers:
 
   packages/convex:
     dependencies:
+      '@firewallops/match-core':
+        specifier: workspace:*
+        version: link:../match-core
       '@shared/sim':
         specifier: workspace:*
         version: link:../shared
       convex:
         specifier: 1.41.0
         version: 1.41.0(bufferutil@4.1.0)(react@19.2.7)(utf-8-validate@6.0.6)
+      zod:
+        specifier: 4.4.3
+        version: 4.4.3
+
+  packages/match-core:
+    dependencies:
+      '@shared/sim':
+        specifier: workspace:*
+        version: link:../shared
       zod:
         specifier: 4.4.3
         version: 4.4.3
@@ -98,6 +110,9 @@ importers:
       '@firewallops/convex':
         specifier: workspace:*
         version: link:../convex
+      '@firewallops/match-core':
+        specifier: workspace:*
+        version: link:../match-core
       '@shared/sim':
         specifier: workspace:*
         version: link:../shared

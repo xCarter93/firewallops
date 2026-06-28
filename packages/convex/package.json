@@ -13,6 +13,7 @@
   },
   "dependencies": {
     "@shared/sim": "workspace:*",
+    "@firewallops/match-core": "workspace:*",
     "convex": "1.41.0",
     "zod": "4.4.3"
   }

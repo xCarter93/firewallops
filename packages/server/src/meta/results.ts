@@ -17,7 +17,7 @@
  * authoritative room re-issuing the same granular ids.
  */
 import { getConvex, api } from "./convexClient.js";
-import type { MatchResultMessage } from "../match/messageSchemas.js";
+import type { MatchResultMessage } from "@firewallops/match-core";
 
 export type MatchResultPayload = MatchResultMessage;
 

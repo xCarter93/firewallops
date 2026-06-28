@@ -46,16 +46,18 @@ import {
   teamSizeForMode,
   type MatchMode,
   resolveDwellMs,
-} from "../config.js";
-import { MAP, spawnLayout, surfaceY, settledY, randomDummyX } from "../match/world.js";
-import { runServerShot, type ServerMech } from "../match/resolve.js";
-import {
+  MAP,
+  spawnLayout,
+  surfaceY,
+  settledY,
+  randomDummyX,
+  runServerShot,
+  type ServerMech,
   advanceTurn,
   checkWinTeam,
   assignTeam,
   seatsFull,
   shouldAutoStart,
-  timeoutOutcome,
   forfeitOutcome,
   canFire,
   shouldResolveFire,
@@ -67,8 +69,6 @@ import {
   resetPlayerShotStateOn,
   shouldStartImmediately,
   type TurnMobile,
-} from "../match/turnMachine.js";
-import {
   fireSchema,
   aimSchema,
   selectItemSchema,
@@ -81,10 +81,10 @@ import {
   type ReadyMessage,
   type ResetRangeMessage,
   type HeartbeatMessage,
-} from "../match/messageSchemas.js";
+  buildMatchStartPlayers,
+} from "@firewallops/match-core";
 import { recordMatchResult } from "../meta/results.js";
 import { recordMatchStart, recordMatchEnd } from "../meta/matches.js";
-import { buildMatchStartPlayers } from "../match/matchPersistence.js";
 import { verifyClerk } from "../auth/clerk.js";
 import { getConvex, api } from "../meta/convexClient.js";
 import {
@@ -1086,8 +1086,15 @@ export class MatchRoom extends Room<{ state: MatchState }> {
   }
 
   /**
-   * Turn-timeout (NET-04): auto-fire the LOCKED aim, or skip + apply
-   * FORFEIT_DELAY. Either branch advances — the match never stalls.
+   * Turn-timeout (NET-04, Phase 9 D-02 refactor): SKIP-only. The timeout NEVER
+   * auto-fires a locked aim anymore — it always yields the turn by penalizing the
+   * delay accumulator with FORFEIT_DELAY, then advances. The match never stalls.
+   *
+   * The old `timeoutOutcome` auto-fire branch (fire the last streamed aim on a
+   * locked power) was removed in the migration to decouple the timeout from aim
+   * state (D-02). The authoritative SKIP behavior moves to the Convex
+   * `onTurnTimeout` mutation in plan 05; this server keeps only the SKIP path so
+   * plan 05 cannot accidentally re-port the auto-fire surface.
    */
   private onTimeout(): void {
     const active = this.state.mobiles.get(this.state.activePlayer);
@@ -1097,27 +1104,9 @@ export class MatchRoom extends Room<{ state: MatchState }> {
       return;
     }
 
-    const outcome = timeoutOutcome({
-      sessionId: active.sessionId,
-      team: active.team,
-      hp: active.hp,
-      accumulatedDelay: active.accumulatedDelay,
-      powerLocked: active.powerLocked,
-    });
-
-    if (outcome.kind === "auto-fire") {
-      // Fire the last streamed aim (the locked shot) via the same resolve path.
-      this.resolveActiveShot(
-        active,
-        active.angleDeg,
-        active.power,
-        active.selectedItemId,
-      );
-    } else {
-      // Skip: yield the turn by penalizing the delay accumulator.
-      active.accumulatedDelay += FORFEIT_DELAY;
-      this.startTurn();
-    }
+    // Skip: yield the turn by penalizing the delay accumulator. Fires nothing.
+    active.accumulatedDelay += FORFEIT_DELAY;
+    this.startTurn();
   }
 
   /**

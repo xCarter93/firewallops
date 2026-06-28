@@ -24,7 +24,7 @@ import type { Application } from "express";
 import cors from "cors";
 import { getLoadout } from "./loadout.js";
 import { recordMatchResult } from "./results.js";
-import { matchResultSchema } from "../match/messageSchemas.js";
+import { matchResultSchema } from "@firewallops/match-core";
 import { clerkWebhookHandler } from "./webhooks.js";
 import { verifyClerk } from "../auth/clerk.js";
 import { getConvex, api } from "./convexClient.js";

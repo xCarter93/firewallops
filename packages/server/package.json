@@ -21,6 +21,7 @@
     "@clerk/backend": "3.8.2",
     "svix": "1.96.0",
     "@shared/sim": "workspace:*",
+    "@firewallops/match-core": "workspace:*",
     "@firewallops/convex": "workspace:*",
     "convex": "1.41.0"
   },

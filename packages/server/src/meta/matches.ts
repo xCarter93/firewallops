@@ -10,7 +10,7 @@
  * it must not throw even when Convex is unconfigured (e.g. local dev).
  */
 import { getConvex, api } from "./convexClient.js";
-import type { MatchStartPlayer } from "../match/matchPersistence.js";
+import type { MatchStartPlayer } from "@firewallops/match-core";
 
 /** Record the match roster at start (idempotent upsert on roomId). No-op if empty. */
 export function recordMatchStart(
