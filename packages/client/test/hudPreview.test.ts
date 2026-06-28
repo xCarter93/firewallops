@@ -23,7 +23,6 @@ vi.mock("../src/game-config.js", () => ({ GAME_CONFIG: { parent: "game-container
 const requireAuthSpy = vi.fn(() => true);
 vi.mock("../src/shell/auth.js", () => ({
   RETURN_TO_KEY: "fwops:returnTo",
-  SERVER_HTTP_URL: "http://localhost:2567",
   isSignedIn: () => true,
   requireAuth: requireAuthSpy,
   openSignIn: vi.fn(),
@@ -55,15 +54,6 @@ vi.mock("../src/shell/net/matchSession.js", () => ({
     reconnect: reconnectSpy,
     leaveCurrent,
   },
-}));
-
-// ── net/room: the play-page Blocker-3 handoff (not exercised on the preview path) ─
-vi.mock("../src/net/room.js", () => ({
-  provideMatchRoom: vi.fn(),
-  setShellMatchEndHook: vi.fn(),
-  notifyShellMatchEnded: vi.fn(),
-  takeProvidedMatchRoom: vi.fn(() => null),
-  attachToMatch: vi.fn((r: unknown) => r),
 }));
 
 /** Wait a couple of microtasks/macrotasks so any async render settles. */

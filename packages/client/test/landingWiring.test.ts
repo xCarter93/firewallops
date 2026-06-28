@@ -27,7 +27,6 @@ let signedIn = true;
 const openSignIn = vi.fn();
 vi.mock("../src/shell/auth.js", () => ({
   RETURN_TO_KEY: "fwops:returnTo",
-  SERVER_HTTP_URL: "http://localhost:2567",
   isSignedIn: () => signedIn,
   requireAuth: () => signedIn,
   openSignIn,
