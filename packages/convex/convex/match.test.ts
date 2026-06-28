@@ -78,6 +78,26 @@ describe("match authority — lobby/membership (Plan 04)", () => {
     expect(doc!.localMobileId).toBe(doc!.mobiles[0].mobileId);
   });
 
+  it("(b2) createRoom seats the CREATOR as room master — no separate join needed", async () => {
+    const t = harness();
+    const asA = t.withIdentity({ subject: SUB_A });
+    const matchId = await asA.mutation(api.match.createRoom, {
+      name: "t",
+      mode: "1v1",
+    });
+    // The room opens with the creator already seated. The lobby/room pages do NOT
+    // re-join, so an empty room would leave the creator unseated (and `get`'s
+    // membership gate would even throw "not a member") until a leave+rejoin.
+    const doc = await asA.query(api.match.get, { matchId });
+    expect(doc).not.toBeNull();
+    expect(doc!.status).toBe("open");
+    expect(doc!.phase).toBe("WAITING");
+    expect(doc!.mobiles.length).toBe(1);
+    expect(doc!.mobiles[0].team).toBe(0); // joinOrder 0 ⇒ team A.
+    // [I] the creator's own seat resolves — the YOU badge + READY toggle depend on it.
+    expect(doc!.localMobileId).toBe(doc!.mobiles[0].mobileId);
+  });
+
   it("(c) capacity — joining past seatsFull rejects (1v1 = 2 seats)", async () => {
     const t = harness();
     const asA = t.withIdentity({ subject: SUB_A });

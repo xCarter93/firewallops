@@ -250,6 +250,34 @@ export const createRoom = mutation({
       return matchId;
     }
 
+    // Seat the CREATOR as room master (joinOrder 0 → team A, seat 0) — the SAME seat
+    // joinMatch would assign for the first occupant. Both the lobby create flow and
+    // room.ts assume the caller is already seated by createRoom (room.ts does NOT
+    // re-join), so a multiplayer room MUST open with its creator in it — mirroring the
+    // training branch's human seat above. Without this the creator sits unseated
+    // (no mobile → no localMobileId → no YOU badge / READY) until they leave + rejoin.
+    const teamSize = teamSizeForMode(mode as MatchMode);
+    const creatorSeat = spawnLayout(mask, teamSize)[0];
+    const creatorName = await resolveDisplayName(ctx, accountId);
+    const creator: LiveMobile = {
+      mobileId: crypto.randomUUID(),
+      accountId, // PRIVATE — server-set from identity, stripped on read (R2).
+      team: 0, // joinOrder 0 ⇒ team A (assignTeam(0)).
+      x: creatorSeat.x,
+      y: creatorSeat.y,
+      hp: DEFAULT_HP,
+      angleDeg: 45,
+      power: 0,
+      selectedItemId: "shot-1",
+      accumulatedDelay: 0,
+      ssHitCharge: 0,
+      facing: 1, // team A faces right.
+      ready: false,
+      passive: false,
+      displayName: creatorName,
+      connected: true,
+    };
+
     const matchId = await ctx.db.insert("matches", {
       status: "open",
       mode,
@@ -261,7 +289,7 @@ export const createRoom = mutation({
       turnSeq: 0,
       winnerTeam: -1,
       terrainVersion: 0,
-      mobiles: [],
+      mobiles: [creator],
       lastActivityAt: Date.now(),
     });
 
