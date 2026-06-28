@@ -136,6 +136,9 @@ export const startTurn = internalMutation({
       wind,
       turnSeq,
       mobiles: nextMobiles,
+      // Per-turn heartbeat for the idle-TTL cleanup: keeps an actively-played match
+      // (incl. training, which has turnEndsAt:0) fresh so the cron never sweeps it.
+      lastActivityAt: Date.now(),
     });
 
     await ctx.scheduler.runAfter(

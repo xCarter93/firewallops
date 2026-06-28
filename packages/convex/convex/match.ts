@@ -237,6 +237,7 @@ export const createRoom = mutation({
         winnerTeam: -1,
         terrainVersion: 0,
         mobiles: [human, spawnDummy(mask)],
+        lastActivityAt: Date.now(),
       });
       await ctx.db.insert("matchTerrain", {
         matchId,
@@ -261,6 +262,7 @@ export const createRoom = mutation({
       winnerTeam: -1,
       terrainVersion: 0,
       mobiles: [],
+      lastActivityAt: Date.now(),
     });
 
     // One-shot RLE terrain snapshot, kept OFF the reactive `matches` doc
@@ -347,7 +349,7 @@ export const joinMatch = mutation({
     // full && all-ready in toggleReady).
     const status = seatsFull(mobiles.length, teamSize) ? "full" : match.status;
 
-    await ctx.db.patch(matchId, { mobiles, status });
+    await ctx.db.patch(matchId, { mobiles, status, lastActivityAt: Date.now() });
     return matchId;
   },
 });
@@ -600,6 +602,7 @@ export const fireShot = mutation({
       turnEndsAt: 0,
       terrainVersion: nextTerrainVersion,
       mobiles,
+      lastActivityAt: Date.now(),
       lastShot: {
         seq: shotSeq,
         byMobileId: active.mobileId,
@@ -668,7 +671,11 @@ export const resetRange = mutation({
       });
     mobiles.push(spawnDummy(mask));
 
-    await ctx.db.patch(matchId, { mobiles, terrainVersion: nextTerrainVersion });
+    await ctx.db.patch(matchId, {
+      mobiles,
+      terrainVersion: nextTerrainVersion,
+      lastActivityAt: Date.now(),
+    });
 
     // Re-enter a clean turn (rolls wind once, picks the human, re-arms the dwell).
     await ctx.runMutation(internal.match_internal.startTurn, { matchId });

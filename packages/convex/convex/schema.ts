@@ -59,6 +59,14 @@ export default defineSchema({
     ),
     mode: v.string(), // "1v1" | "2v2" | "4v4" | "training"
     name: v.string(), // lobby label
+    // --- retention: idle-TTL cleanup (crons.ts → cleanup.sweep) ---
+    // ms epoch of the last authority write (create/join/turn/shot/reset). The cron
+    // deletes matches idle past CLEANUP_IDLE_MS and CASCADES matchTerrain+matchAim,
+    // so ephemeral live-match state never accumulates. Optional so pre-field rows
+    // validate; the sweep falls back to `_creationTime` for them. Uses an idle
+    // timestamp (not status) so in-progress TRAINING — which has turnEndsAt:0 and
+    // never reaches "ended" — is still protected while actively played.
+    lastActivityAt: v.optional(v.number()),
     // --- turn machine (was MatchState scalars) ---
     phase: v.string(), // WAITING | TURN_START | AIMING | RESOLVING | RESULTS
     activeMobileId: v.string(), // was activePlayer; stable per-match mobile id, NOT a Colyseus sessionId
@@ -109,7 +117,9 @@ export default defineSchema({
         connected: v.boolean(), // presence; default true
       }),
     ),
-  }).index("by_status", ["status"]), // for lobby.listOpen
+  })
+    .index("by_status", ["status"]) // for lobby.listOpen
+    .index("by_last_activity", ["lastActivityAt"]), // for cleanup.sweep idle-TTL
 
   /**
    * Authoritative terrain mask — RLE bytes, NOT on the reactive `matches` doc
