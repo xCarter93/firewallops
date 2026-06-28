@@ -3,6 +3,8 @@
 .claude/
 .codex/
 .agents/
+agent/
+skills-lock.json
 
 # Node / build artifacts
 node_modules/
