@@ -177,7 +177,23 @@ export class MatchScene extends Phaser.Scene {
    */
   private disposed = false;
   private room?: Room;
+  /**
+   * The LOCAL player's own seat id used for ALL input gating
+   * (`isLocalActiveAndAiming`, the per-mobile `id === this.sessionId` branches in
+   * syncFromState, the local MechView lookup). Named `sessionId` for historical
+   * Colyseus reasons, but in the pure-Convex path (plan 06, review [I]) its SOURCE
+   * is the Convex `localMobileId` (`api.match.get`'s caller-only seat id) — set via
+   * `setLocalMobileId()`, the replacement for the Colyseus `room.sessionId`
+   * assignment (accountId never crosses the wire). The `=== activePlayerId` /
+   * `id === sessionId` comparisons keep working unchanged in shape.
+   */
   private sessionId = "";
+  /**
+   * [I] The Convex caller-seat id surfaced by convexClient (`onLocalIdentity`). Kept
+   * as a distinct field so a late/duplicate identity push is idempotent and the
+   * source of `this.sessionId` is explicit. Mirrors `sessionId` in the Convex path.
+   */
+  private localMobileId = "";
   private syncedPhase = "WAITING";
   private activePlayerId = "";
   private isAnimatingShot = false;
@@ -779,6 +795,21 @@ export class MatchScene extends Phaser.Scene {
     notifyShellMatchEnded(winnerTeam, draw);
   }
 
+  /**
+   * [I] Set the LOCAL seat id from the Convex `localMobileId` (the convexClient
+   * `onLocalIdentity` callback). This REPLACES the Colyseus `this.sessionId =
+   * room.sessionId` assignment (createNetworked/bindRoom) as the SOURCE of the local
+   * id — `accountId` never crosses the wire, so `api.match.get`'s caller-only
+   * `localMobileId` is the only place the client learns its own seat. All input
+   * gating (`isLocalActiveAndAiming`, the `id === this.sessionId` branches) keeps
+   * working unchanged in shape. Idempotent — a duplicate identity push is a no-op.
+   */
+  public setLocalMobileId(localMobileId: string): void {
+    if (this.disposed || !localMobileId) return;
+    this.localMobileId = localMobileId;
+    this.sessionId = localMobileId;
+  }
+
   /** Networked input gate: local + active + AIMING + not animating. */
   private isLocalActiveAndAiming(): boolean {
     return (
@@ -947,6 +978,24 @@ export class MatchScene extends Phaser.Scene {
    * here — the broadcast `animateShot` owns the animation.
    */
   private fireNetworked(view: MechView): void {
+    // [H] Out-of-turn / wrong-phase fire UX (preserved). The Colyseus server used to
+    // reply `fireRejected` for a fire it refused; the Convex `fireShot` instead
+    // SILENTLY no-ops out-of-turn (plan 05). So the rejection trigger moves
+    // client-side: pre-check the local-active-AIMING gate here and, when NOT allowed,
+    // invoke the SAME `notifyShellFireRejected(reason)` fan-out the play page renders
+    // as a toast — instead of sending a no-op mutation. The render is UNCHANGED; only
+    // the trigger source moved. (Reasons mirror the old server fireRejected copy.)
+    if (!this.isLocalActiveAndAiming()) {
+      const reason =
+        this.sessionId !== this.activePlayerId
+          ? "Not your turn"
+          : this.syncedPhase !== "AIMING"
+            ? "Cannot fire right now"
+            : "rejected";
+      notifyShellFireRejected(reason);
+      return;
+    }
+
     this.hud.clearIntro();
     const def = LOADOUT[this.selectedShotId];
 

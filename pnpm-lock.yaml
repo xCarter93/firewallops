@@ -46,9 +46,15 @@ importers:
       '@colyseus/sdk':
         specifier: 0.17.43
         version: 0.17.43(@colyseus/core@0.17.43)(bufferutil@4.1.0)(typescript@6.0.3)(utf-8-validate@6.0.6)(zod@4.4.3)
+      '@firewallops/convex':
+        specifier: workspace:*
+        version: link:../convex
       '@shared/sim':
         specifier: workspace:*
         version: link:../shared
+      convex:
+        specifier: 1.41.0
+        version: 1.41.0(bufferutil@4.1.0)(react@19.2.7)(utf-8-validate@6.0.6)
       phaser:
         specifier: 4.1.0
         version: 4.1.0

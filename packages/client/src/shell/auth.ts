@@ -1,4 +1,5 @@
 import { Clerk } from "@clerk/clerk-js";
+import { setConvexAuth } from "../net/convexClient.js";
 
 /**
  * Clerk vanilla (non-React) auth module for the web-app shell (Phase 5, Plan 06).
@@ -196,6 +197,38 @@ export async function initAuth(): Promise<void> {
   const instance = new Clerk(key);
   await instance.load({ appearance, ui: { ClerkUI: ctor as ClerkUICtor } });
   clerk = instance;
+
+  // Phase 9 (plan 06, GATE-AUTH): wire the Clerk 'convex' JWT template token onto
+  // the Convex client so every authed Convex call (api.match.*, api.lobby.*) carries
+  // it. This REPLACES the Colyseus token-in-join-options path (room.ts joinRoomById
+  // `{ token }`). The client ONLY supplies the token; Convex verifies the issuer
+  // (auth.config.ts, plan 03) and reads getUserIdentity().subject server-side —
+  // accountId never crosses the wire (T-09-12). The Convex SDK calls this lazily
+  // (and on forceRefreshToken), so it mints a fresh short-lived token per call.
+  //
+  // Pitfall (R6): the Clerk 'convex' JWT template MUST exist or getUserIdentity() is
+  // null. The live-sub PROOF (a signed-in browser making the first authed call) is a
+  // founder browser action at the 09-07 E2E gate — it cannot be proven at build time.
+  setConvexAuth(({ forceRefreshToken }) => getConvexToken(forceRefreshToken));
+}
+
+/**
+ * The Clerk 'convex' JWT template token (Phase 9, GATE-AUTH), or `null` when signed
+ * out / no session. This is the token handed to `ConvexClient.setAuth` — DISTINCT
+ * from the default `getToken()` (the Colyseus/Meta-API session token): Convex's
+ * `auth.config.ts` validates the 'convex' template's `aud`/issuer specifically.
+ * `forceRefreshToken` (from the Convex SDK) skips Clerk's token cache on refresh.
+ */
+export async function getConvexToken(
+  forceRefreshToken = false,
+): Promise<string | null> {
+  const c = requireClerk();
+  return (
+    (await c.session?.getToken({
+      template: "convex",
+      skipCache: forceRefreshToken,
+    })) ?? null
+  );
 }
 
 /** True if a Clerk session is active (sync). */
