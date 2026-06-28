@@ -16,5 +16,10 @@
     "@firewallops/match-core": "workspace:*",
     "convex": "1.41.0",
     "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "@edge-runtime/vm": "5.0.0",
+    "convex-test": "0.0.54",
+    "vitest": "3.2.4"
   }
 }
