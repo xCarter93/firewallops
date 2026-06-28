@@ -1,6 +1,7 @@
 import { getToken, mountUserButton, SERVER_HTTP_URL } from "../auth.js";
 import type { NetHandlers } from "../../net/room.js";
-import { matchSession } from "../net/matchSession.js";
+import { matchSession, convexMatchSession } from "../net/matchSession.js";
+import { createRoom as convexCreateRoom } from "../../net/convexClient.js";
 import {
   subscribeLobby,
   type LobbyRoomEntry,
@@ -62,6 +63,20 @@ type Mode = (typeof MODES)[number];
  * 3). These are inert no-ops so creating a room never throws on an early patch.
  */
 const inertHandlers: NetHandlers = {
+  onShotResult: () => {},
+  onTerrainSnapshot: () => {},
+  onMatchEnded: () => {},
+  onStateChange: () => {},
+};
+
+/**
+ * Inert Convex handlers for the TRAINING-card create (plan 07). The lobby only needs
+ * the matchId subscribed on convexMatchSession so the play page detects the Convex
+ * training route (currentMatchId === roomId); the REAL per-doc handlers are supplied
+ * by MatchScene.bindConvexMatch when Phaser boots (convexMatchSession.subscribe
+ * re-binds, tearing down this inert subscription). No-ops so an early doc patch is harmless.
+ */
+const inertConvexHandlers = {
   onShotResult: () => {},
   onTerrainSnapshot: () => {},
   onMatchEnded: () => {},
@@ -542,22 +557,21 @@ export function renderLobby(
     modeCard("⬢", "var(--violet-2)", "CUSTOM", "Build a room", null, () => openCreateForm()),
   );
   modeCards.appendChild(
-    // TRAINING is the LIVE solo-range path — mirrors the DEPLOY ROOM confirm flow
-    // but with a fixed name + the "training" mode so the server spawns the passive
-    // dummy range (Plan 02). Routes through the single-owner matchSession (Blocker 3)
-    // → /room/:id, which auto-forwards to /play the instant the server flips phase
-    // out of WAITING (training starts immediately).
+    // TRAINING is the LIVE solo-range path — now on CONVEX (plan 07). It calls the
+    // Convex `createRoom({mode:'training'})` mutation, which seats the caller, spawns
+    // the passive dummy, and starts the turn server-side (status: "active", so the
+    // training room is inherently UNLISTED — lobby.listOpen never returns it). Training
+    // starts immediately, so it forwards straight to /play/:matchId (no /room staging).
+    // The matchId is stored in convexMatchSession so the play page drives the Convex
+    // training path. Auth-gate preserved (D-10 — card only available signed-in); the
+    // manual getToken() pass is DROPPED (the Convex path authenticates via
+    // client.setAuth('convex'), wired in shell/auth.ts plan 06).
     modeCard("◎", "var(--warn)", "TRAINING", "Solo range", null, () => {
       void (async () => {
         try {
-          const token = await getToken();
-          const room = await matchSession.create(
-            "TRAINING",
-            "training",
-            token ?? "",
-            inertHandlers,
-          );
-          go(`/room/${encodeURIComponent(room.roomId)}`);
+          const matchId = await convexCreateRoom("TRAINING", "training");
+          convexMatchSession.subscribe(matchId, inertConvexHandlers);
+          go(`/play/${encodeURIComponent(matchId)}`);
         } catch (e) {
           console.error("[lobby] training create failed", e);
         }

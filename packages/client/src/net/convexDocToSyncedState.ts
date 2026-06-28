@@ -79,6 +79,13 @@ export interface SyncedMobile {
   accumulatedDelay: number;
   selectedItemId: string;
   connected: boolean;
+  /**
+   * The training-range dummy is flagged `passive` by the server (Phase 8 / Plan 02).
+   * Its presence in the synced mobiles is how the client detects a TRAINING room (a
+   * read-only presentation gate — play.ts's training-detection rAF reads this, NOT an
+   * authority decision; threat T-08-09). Defaults `false` when absent on the doc.
+   */
+  passive: boolean;
 }
 
 /**
@@ -118,6 +125,9 @@ function toSyncedMobile(m: ConvexMobile): SyncedMobile {
     // Presence defaults true when the field is absent (matches the scene's
     // `mobile.connected !== false` read, MatchScene.ts:534).
     connected: m.connected !== false,
+    // The training dummy flag — carried through so play.ts's training-detection rAF
+    // (the synced `passive` dummy read) fires on the Convex route. Absent ⇒ false.
+    passive: m.passive === true,
   };
 }
 

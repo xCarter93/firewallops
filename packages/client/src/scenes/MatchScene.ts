@@ -32,6 +32,13 @@ import {
   takeProvidedMatchRoom,
 } from "../net/room.js";
 import { ShotResultBridge } from "../net/shotResultBridge.js";
+import {
+  takeProvidedConvexMatch,
+  hasProvidedConvexMatch,
+  fireShot as convexFireShot,
+  type ConvexNetHandlers,
+} from "../net/convexClient.js";
+import { convexMatchSession } from "../shell/net/matchSession.js";
 import type { Room } from "@colyseus/sdk";
 import {
   MAP,
@@ -125,6 +132,13 @@ interface SyncedMobile {
    * MechView.setConnected (dim mech + RECONNECTING badge).
    */
   connected: boolean;
+  /**
+   * The training-range dummy flag (Phase 8 / Plan 02). Carried on the synced shape so
+   * the Convex-mapped state is assignable to what the scene reads and the training
+   * detection (play.ts) sees the passive dummy. Optional — the Colyseus path may omit
+   * it; the Convex mapper always supplies it (defaulting false when absent on the doc).
+   */
+  passive?: boolean;
 }
 
 /** The synced MatchState shape the scene reads. */
@@ -177,6 +191,14 @@ export class MatchScene extends Phaser.Scene {
    */
   private disposed = false;
   private room?: Room;
+  /**
+   * [Convex training, plan 07] The matchId the scene is driving off the Convex
+   * subscription, or `undefined` on the Colyseus path. When set, fire routes through
+   * the `convexFireShot` mutation (no `this.room`), and the live subscription disposer
+   * (`convexUnsub`) is torn down on SHUTDOWN. Only the TRAINING route sets this for
+   * now (the multiplayer routes flip in plan 08).
+   */
+  private convexMatchId?: string;
   /**
    * The LOCAL player's own seat id used for ALL input gating
    * (`isLocalActiveAndAiming`, the per-mobile `id === this.sessionId` branches in
@@ -246,9 +268,13 @@ export class MatchScene extends Phaser.Scene {
 
     // Boot mode flag (Authority Decision 6): networked is opt-in; hotseat is the
     // DEFAULT dev loop. `VITE_NETWORKED=1 pnpm --filter @firewallops/client dev`
-    // starts networked mode.
+    // starts networked mode. The Convex TRAINING route (plan 07) also takes the
+    // networked path even with VITE_NETWORKED off — the play page provides a Convex
+    // matchId (peeked here, NOT consumed; createNetworked takes it) so the scene
+    // drives off the Convex subscription instead of a Colyseus room.
     const flag = import.meta.env.VITE_NETWORKED;
-    this.networked = flag === "1" || flag === "true";
+    this.networked =
+      flag === "1" || flag === "true" || hasProvidedConvexMatch();
 
     if (this.networked) {
       this.createNetworked();
@@ -431,6 +457,23 @@ export class MatchScene extends Phaser.Scene {
       onFireRejected: (reason: string) => notifyShellFireRejected(reason),
     };
 
+    // ── CONVEX TRAINING ROUTE (plan 07) ──────────────────────────────────────────
+    // If the play page provided a Convex matchId (training only for now), the scene's
+    // SOURCE of state is the Convex reactive subscription, NOT a Colyseus room. The
+    // handlers above are the SAME contract — onStateChange/onShotResult/onTerrainSnapshot
+    // /onMatchEnded drive the UNCHANGED render path; we only add onLocalIdentity (the
+    // Convex `localMobileId` → setLocalMobileId, [I], the replacement for room.sessionId)
+    // and route the fire seam through the `fireShot` mutation (no `this.room`). All the
+    // `if (this.room)` aim/select sends below harmlessly no-op (room is undefined) — the
+    // Convex `fireShot` mutation carries the committed angle/power/itemId, so the server
+    // re-derives the outcome with no streamed aim. Return early so the Colyseus
+    // adopt/connect path is never entered on the training route.
+    const providedConvexMatchId = takeProvidedConvexMatch();
+    if (providedConvexMatchId) {
+      this.bindConvexMatch(providedConvexMatchId, handlers);
+      return;
+    }
+
     // Bind the controller's fire sender once we hold the room (shared by both the
     // adopted-room handoff and the standalone connect path). The seam stays live:
     // the scene still calls controller.applyShot; the controller forwards here
@@ -464,6 +507,55 @@ export class MatchScene extends Phaser.Scene {
           console.error("[net] failed to join match", err);
         });
     }
+  }
+
+  /**
+   * [Convex training, plan 07] Drive the scene off the Convex reactive subscription
+   * instead of a Colyseus room. This is the Convex analog of `bindRoom` + the adopt
+   * branch: it subscribes (via the single-owner `convexMatchSession`) with the SAME
+   * NetHandlers — extended with `onLocalIdentity` (the caller's `localMobileId` →
+   * `setLocalMobileId`, [I]) — and injects the fire seam so `controller.applyShot`
+   * forwards to the `fireShot` mutation. The subscription disposer is torn down on
+   * scene SHUTDOWN (the connection does NOT outlive the scene on the Convex path —
+   * there is no seat; `convexMatchSession` re-subscribes on a fresh mount). The render
+   * mechanism (syncFromState/animateShot/terrain) is UNCHANGED — only the SOURCE moved.
+   */
+  private bindConvexMatch(
+    matchId: string,
+    handlers: ConvexNetHandlers,
+  ): void {
+    this.convexMatchId = matchId;
+
+    // The fire seam → the Convex `fireShot` mutation (fire-and-forget; the server
+    // re-derives every outcome, plan 05). The committed ABSOLUTE angle + power +
+    // selected item ride the mutation — no streamed aim is needed (the Colyseus
+    // `sendAim`/`sendSelectItem` calls in updateNetworked/fireNetworked are
+    // `if (this.room)`-guarded, so they no-op on this path).
+    this.controller.setFireSender((aim) => {
+      void convexFireShot(
+        matchId,
+        aim.angleDeg,
+        aim.power,
+        this.selectedShotId,
+      ).catch((err: unknown) => {
+        console.error("[convex] fireShot failed", err);
+      });
+    });
+
+    // Subscribe with the SAME handlers + the Convex-only onLocalIdentity seam ([I]).
+    convexMatchSession.subscribe(matchId, {
+      ...handlers,
+      onLocalIdentity: (localMobileId: string) =>
+        this.setLocalMobileId(localMobileId),
+    });
+
+    // Drop the live subscription when the scene shuts down (the Convex analog of the
+    // Colyseus disposeMatchHandlers — no seat to keep, so unsubscribe and stop the
+    // reactive feed; a fresh /play mount re-subscribes). This does NOT call
+    // `leaveMatch` — leaving is the EXIT control's job (play.ts → leaveCurrent).
+    this.events.once(Phaser.Scenes.Events.SHUTDOWN, () => {
+      convexMatchSession.unsubscribe();
+    });
   }
 
   /**

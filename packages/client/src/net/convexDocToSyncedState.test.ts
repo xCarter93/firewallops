@@ -47,6 +47,7 @@ function sampleDoc(): ConvexMatchDoc {
         ssHitCharge: 0,
         accumulatedDelay: 300,
         selectedItemId: "shot-2",
+        passive: true, // the training-range dummy — explicit passive flag
         // connected intentionally omitted → defaults true
       },
     ],
@@ -116,5 +117,17 @@ describe("convexDocToSyncedState", () => {
       byId[m.sessionId] = m.connected;
     });
     expect(byId["mob-B"]).toBe(false);
+  });
+
+  it("carries the training `passive` dummy flag through (explicit true; absent → false)", () => {
+    // The training-detection rAF in play.ts reads the synced `passive` flag to
+    // mount the TRAINING controls; the mapper must preserve it end-to-end.
+    const s = convexDocToSyncedState(sampleDoc());
+    const byId: Record<string, boolean> = {};
+    s.mobiles.forEach((m) => {
+      byId[m.sessionId] = m.passive;
+    });
+    expect(byId["mob-A"]).toBe(false); // no passive field on the doc → defaults false
+    expect(byId["mob-B"]).toBe(true); // explicit passive:true → carried through
   });
 });

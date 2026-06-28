@@ -67,6 +67,7 @@ const fakeRoom = {
   leave: vi.fn(async () => {}),
 };
 const leaveCurrent = vi.fn(async () => {});
+const convexLeaveCurrent = vi.fn(async () => {});
 vi.mock("../src/shell/net/matchSession.js", () => ({
   matchSession: {
     get current() {
@@ -78,6 +79,16 @@ vi.mock("../src/shell/net/matchSession.js", () => ({
     join: vi.fn(async () => fakeRoom),
     reconnect: vi.fn(async () => null),
     leaveCurrent,
+  },
+  // Convex single-owner session (plan 09-06/07). For this smoke `currentMatchId`
+  // is null so /play/ROOM1 takes the (still-active) Colyseus reuse path — the
+  // Convex TRAINING branch (play.ts:696) is covered by the human-verify gate.
+  convexMatchSession: {
+    get currentMatchId() {
+      return null;
+    },
+    subscribe: vi.fn(),
+    leaveCurrent: convexLeaveCurrent,
   },
 }));
 

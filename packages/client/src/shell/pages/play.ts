@@ -2,7 +2,7 @@ import type PhaserNamespace from "phaser";
 import type { Room } from "@colyseus/sdk";
 import { CloseCode } from "@colyseus/sdk";
 import { getToken } from "../auth.js";
-import { matchSession } from "../net/matchSession.js";
+import { matchSession, convexMatchSession } from "../net/matchSession.js";
 import {
   provideMatchRoom,
   sendResetRange,
@@ -10,6 +10,10 @@ import {
   setShellMatchEndHook,
 } from "../../net/room.js";
 import type { NetHandlers } from "../../net/room.js";
+import {
+  provideConvexMatch,
+  resetRange as convexResetRange,
+} from "../../net/convexClient.js";
 import { mountHudOverlay } from "../hud/hudOverlay.js";
 import { bindHudToRoom } from "../hud/hudBinding.js";
 import type { HudViewModel } from "../hud/hudViewModel.js";
@@ -380,6 +384,138 @@ export function renderPlay(
     navigate("/lobby");
   };
 
+  // ── CONVEX TRAINING ROUTE (plan 07) ─────────────────────────────────────────────
+  //
+  // The pure-Convex training entry. On this route there is NO Colyseus `Room` — the
+  // scene drives off the Convex reactive subscription (MatchScene.bindConvexMatch),
+  // so play.ts only: (1) hands the matchId to the next Phaser boot via
+  // `provideConvexMatch` (the Convex analog of provideMatchRoom), (2) mounts the
+  // Phaser canvas, and (3) mounts the TRAINING label + RESET/EXIT controls bound to
+  // the Convex mutations (RESET → resetRange, EXIT → leaveMatch via
+  // convexMatchSession.leaveCurrent). The Colyseus heartbeat / DOM-HUD-vs-room /
+  // reconnection machinery is NOT used here (Convex has no seat / no WS heartbeat).
+  // This branch is gated to TRAINING only (the multiplayer routes flip in plan 08).
+
+  /** The clean EXIT path for the Convex training route — leaveMatch + unsubscribe. */
+  const exitConvexTraining = (): void => {
+    void convexMatchSession.leaveCurrent(); // leaveMatch mutation + unsubscribe.
+    cleanup();
+    navigate("/lobby");
+  };
+
+  /** Mount the Phaser canvas + TRAINING controls for the Convex training route. */
+  const mountConvexTraining = (matchId: string): void => {
+    teardownPhaser();
+    root.innerHTML = "";
+    const container = document.createElement("div");
+    container.id = "game-container"; // GAME_CONFIG.parent === "game-container"
+    container.style.width = "100vw";
+    container.style.height = "100vh";
+    container.style.position = "relative";
+    root.appendChild(container);
+
+    // Hand the matchId to the next MatchScene boot — the scene's createNetworked()
+    // peeks/takes it and drives off the Convex subscription (no Colyseus room). The
+    // DOM HUD reads room.state on the Colyseus path; the Convex training HUD is the
+    // Phaser HUD (MatchScene keeps it when no DOM overlay mounts). We do NOT mount the
+    // room-bound DOM HUD overlay here (it requires a Colyseus Room).
+    provideConvexMatch(matchId);
+
+    wasTraining = true; // latch for any terminal handling.
+
+    // TRAINING label — top-left, pointer-events:none, above the canvas (same chrome).
+    const label = document.createElement("div");
+    label.textContent = "TRAINING";
+    Object.assign(label.style, {
+      position: "absolute",
+      top: "16px",
+      left: "16px",
+      zIndex: "60",
+      pointerEvents: "none",
+      fontFamily: "var(--font-display)",
+      fontWeight: "800",
+      fontSize: "13px",
+      letterSpacing: "0.16em",
+      color: "var(--warn)",
+      textShadow: "0 0 10px rgba(245,158,11,0.45)",
+    } satisfies Partial<CSSStyleDeclaration>);
+
+    const cluster = document.createElement("div");
+    Object.assign(cluster.style, {
+      position: "absolute",
+      top: "14px",
+      right: "16px",
+      zIndex: "60",
+      display: "flex",
+      gap: "10px",
+      alignItems: "center",
+    } satisfies Partial<CSSStyleDeclaration>);
+
+    const trainBtnStyle: Partial<CSSStyleDeclaration> = {
+      padding: "9px 16px",
+      background: "rgba(11,18,32,0.72)",
+      color: "var(--text)",
+      fontFamily: "var(--font-display)",
+      fontWeight: "700",
+      fontSize: "11px",
+      letterSpacing: "0.08em",
+      border: "1px solid rgba(95,200,245,0.3)",
+      clipPath: "polygon(8px 0,100% 0,100% calc(100% - 8px),calc(100% - 8px) 100%,0 100%,0 8px)",
+      cursor: "pointer",
+    };
+
+    // RESET RANGE → the Convex `resetRange` mutation (TR-9/TR-10; server rebuilds
+    // the range + respawns the dummy). Fire-and-forget; the reactive doc patch +
+    // terrainVersion jump drive the wholesale rebuild back through the subscription.
+    const resetBtn = document.createElement("button");
+    resetBtn.type = "button";
+    resetBtn.textContent = "RESET RANGE (R)";
+    Object.assign(resetBtn.style, trainBtnStyle);
+    resetBtn.addEventListener("click", () => {
+      void convexResetRange(matchId).catch((err: unknown) =>
+        console.error("[play] convex resetRange failed", err),
+      );
+    });
+
+    const exitBtn = document.createElement("button");
+    exitBtn.type = "button";
+    exitBtn.textContent = "EXIT (ESC)";
+    Object.assign(exitBtn.style, trainBtnStyle);
+    exitBtn.style.color = "var(--warn)";
+    exitBtn.style.borderColor = "rgba(245,158,11,0.45)";
+    exitBtn.addEventListener("click", () => exitConvexTraining());
+
+    cluster.append(resetBtn, exitBtn);
+    container.append(label, cluster);
+    track(() => {
+      label.remove();
+      cluster.remove();
+    });
+
+    // Training keybinds: R → reset, ESC → exit (Phase 8). Registered via track() so
+    // cleanup tears them down (no leaked keydown / no post-leave resetRange).
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key === "r" || e.key === "R") {
+        e.preventDefault();
+        void convexResetRange(matchId).catch((err: unknown) =>
+          console.error("[play] convex resetRange failed", err),
+        );
+      } else if (e.key === "Escape") {
+        e.preventDefault();
+        exitConvexTraining();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    track(() => window.removeEventListener("keydown", onKey));
+
+    void (async () => {
+      const Phaser = (await import("phaser")).default;
+      const { GAME_CONFIG } = await import("../../game-config.js");
+      if (disposed) return;
+      game = new Phaser.Game(GAME_CONFIG);
+    })();
+  };
+
   /** Resolve the local player's match outcome from the winnerTeam + our team. */
   const resolveOutcome = (
     room: Room,
@@ -551,6 +687,17 @@ export function renderPlay(
   });
 
   // ── enter /play ─────────────────────────────────────────────────────────────
+
+  // CONVEX TRAINING ROUTE (plan 07): the lobby TRAINING card created a Convex match
+  // and stored its matchId in convexMatchSession before navigating to /play/:matchId.
+  // If this play page is that match, drive the pure-Convex training path (no Colyseus
+  // room): mount the canvas + TRAINING controls bound to the Convex mutations. The
+  // scene subscribes to the reactive doc itself (MatchScene.bindConvexMatch).
+  if (convexMatchSession.currentMatchId === roomId) {
+    mountConvexTraining(roomId);
+    return cleanup;
+  }
+
   void (async () => {
     // BLOCKER 3: reuse the SAME connection the room page joined. If we already hold
     // this exact room, mount against it WITHOUT re-joining and WITHOUT leaving.

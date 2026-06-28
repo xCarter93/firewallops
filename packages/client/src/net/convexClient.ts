@@ -203,6 +203,45 @@ interface SubscribedDoc extends ConvexMatchDoc {
 }
 
 /**
+ * Module-level handoff of the CURRENT Convex matchId from the shell to the Phaser
+ * scene — the Convex analog of `room.ts`'s `provideMatchRoom`/`takeProvidedMatchRoom`
+ * (Blocker 3). For the TRAINING route (plan 07), the play page reads the matchId it is
+ * entering (`convexMatchSession.currentMatchId`) and calls `provideConvexMatch(matchId)`
+ * BEFORE instantiating Phaser. `MatchScene.createNetworked` then calls
+ * `takeProvidedConvexMatch()`: if a matchId is present, the scene drives off the Convex
+ * subscription (subscribe + `setLocalMobileId` + the Convex fire sender) INSTEAD of the
+ * Colyseus `connectToMatch`/adopt path. `take` is one-shot (clears the slot) so a
+ * standalone `VITE_NETWORKED` Colyseus dev boot still falls through to the room path.
+ *
+ * COEXISTENCE: this is purely ADDITIVE — when no Convex matchId is provided (every
+ * multiplayer route until plan 08, and the dev boot), the scene's existing Colyseus
+ * binding is untouched. Only the TRAINING route provides a Convex matchId for now.
+ */
+let providedConvexMatchId: string | null = null;
+
+/** Hand the matchId the play page is entering to the next MatchScene boot (training). */
+export function provideConvexMatch(matchId: string): void {
+  providedConvexMatchId = matchId;
+}
+
+/** Take (and clear) the provided Convex matchId, or `null` if none was provided. */
+export function takeProvidedConvexMatch(): string | null {
+  const id = providedConvexMatchId;
+  providedConvexMatchId = null;
+  return id;
+}
+
+/**
+ * Non-consuming peek: is a Convex matchId currently provided? `MatchScene.create`
+ * uses this to choose the networked boot path (the Convex training route runs with
+ * `VITE_NETWORKED` off — the default dev flag), WITHOUT consuming the slot, which
+ * `createNetworked` then `take`s. (A peek + a later take keeps the one-shot handoff.)
+ */
+export function hasProvidedConvexMatch(): boolean {
+  return providedConvexMatchId !== null;
+}
+
+/**
  * Subscribe to the reactive match doc — the replacement for `room.onStateChange`.
  *
  * On every doc patch it:
