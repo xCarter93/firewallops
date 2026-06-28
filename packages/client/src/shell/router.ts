@@ -184,8 +184,18 @@ export function startRouter(): void {
 
   // After a successful (modal) sign-in, send the user to their intended
   // destination (the stashed share-link / route), or to /lobby by default.
+  //
+  // Clerk's addListener fires on EVERY resources change — including the periodic
+  // session-token refresh (~once a minute), NOT just sign-in/out. So act ONLY on an
+  // actual signed-in/out TRANSITION; otherwise a routine token refresh re-navigates
+  // to /lobby on a timer, which re-renders the hub ("the refresh") and — far worse —
+  // boots the player out of /play mid-match.
+  let wasSignedIn = isSignedIn();
   onAuthChange(() => {
-    if (isSignedIn()) {
+    const nowSignedIn = isSignedIn();
+    if (nowSignedIn === wasSignedIn) return; // token refresh, not a transition.
+    wasSignedIn = nowSignedIn;
+    if (nowSignedIn) {
       const returnTo = consumeReturnTo();
       navigate(returnTo ?? "/lobby");
     } else {
