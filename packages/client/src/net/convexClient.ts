@@ -232,6 +232,36 @@ export function takeProvidedConvexMatch(): string | null {
 }
 
 /**
+ * LIVE LOCAL-AIM MIRROR for the DOM HUD action bar on the Convex route.
+ *
+ * Convex (unlike Colyseus) does NOT stream aim, so the synced `matches` doc's
+ * `power`/`angleDeg` only change on FIRE — the DOM HUD's power meter would sit
+ * frozen while the player charges. The scene writes the LOCAL player's live charge
+ * here every frame (`setLiveAim`) while it is the local player's aiming turn, and
+ * the play-page HUD binding reads it (`getLiveAim`) to override the action bar so
+ * the meter fills live. `active:false` falls back to the synced value (post-fire /
+ * opponent turn). Cosmetic-only — it NEVER affects what `fireShot` sends.
+ */
+export interface LiveAim {
+  active: boolean;
+  power: number;
+  angleDeg: number;
+}
+const _liveAim: LiveAim = { active: false, power: 0, angleDeg: 0 };
+
+/** Scene → HUD: publish the local player's live aim (or `{active:false}` when idle). */
+export function setLiveAim(next: LiveAim): void {
+  _liveAim.active = next.active;
+  _liveAim.power = next.power;
+  _liveAim.angleDeg = next.angleDeg;
+}
+
+/** HUD → read the current live local aim mirror. */
+export function getLiveAim(): LiveAim {
+  return _liveAim;
+}
+
+/**
  * Non-consuming peek: is a Convex matchId currently provided? `MatchScene.create`
  * uses this to choose the networked boot path (the Convex training route runs with
  * `VITE_NETWORKED` off — the default dev flag), WITHOUT consuming the slot, which

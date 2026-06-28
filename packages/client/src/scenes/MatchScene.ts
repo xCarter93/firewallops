@@ -38,6 +38,7 @@ import {
   fireShot as convexFireShot,
   selectItem as convexSelectItem,
   updateAim as convexUpdateAim,
+  setLiveAim as convexSetLiveAim,
   subscribeAim as convexSubscribeAim,
   type ConvexNetHandlers,
   type AimTelegraph,
@@ -1086,6 +1087,11 @@ export class MatchScene extends Phaser.Scene {
       // local barrel + arc from the absolute angle (server-synced localFacing).
       const absAngle = this.absoluteAngle(this.localFacing);
       view.setBarrelAngle(absAngle);
+      // Convex route: publish the LIVE local aim to the DOM HUD so the power meter
+      // fills as we charge (the synced doc only updates power/angle on fire).
+      if (this.convexMatchId) {
+        convexSetLiveAim({ active: true, power: this.power, angleDeg: absAngle });
+      }
       const muzzle = view.getMuzzle();
       this.aimView.drawLaunchIndicator(muzzle, absAngle, this.power, this.syncedWind);
       // AIM-01: render the allowed window arc at the muzzle for the local active player.
@@ -1128,6 +1134,11 @@ export class MatchScene extends Phaser.Scene {
       // Not our turn / mid-animation: clear the local aim overlays so no ghost
       // arc shows for a spectator (opponents see barrel-angle only).
       this.aimView.clear();
+      // Convex route: drop the live-aim override so the DOM HUD action bar falls back
+      // to the synced value (post-fire / opponent turn).
+      if (this.convexMatchId) {
+        convexSetLiveAim({ active: false, power: 0, angleDeg: 0 });
+      }
     }
 
     // C recenter.
