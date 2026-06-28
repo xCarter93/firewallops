@@ -15,6 +15,7 @@ import {
   resetRange as convexResetRange,
   subscribeMatch as convexSubscribeMatch,
   getLiveAim,
+  getShotHold,
   type ConvexNetHandlers,
 } from "../../net/convexClient.js";
 import { mountHudOverlay } from "../hud/hudOverlay.js";
@@ -456,16 +457,34 @@ export function renderPlay(
     if (DOM_HUD) {
       overlay = mountHudOverlay(container);
       stopHudRaf = bindHudToRoom(hudRoom, overlay, () => disposed, (vm) => {
+        let out = vm;
+        // SHOT-HOLD: Convex resolves a shot in one doc write, so the reduced HP lands
+        // in the SAME patch as the shot — the scene defers the canvas HP-bar drop until
+        // the projectile lands, so hold the turn-row HP at the pre-shot snapshot too
+        // (otherwise the HUD's HP number drops the instant you fire). Cleared on land.
+        const hold = getShotHold();
+        if (hold.active) {
+          out = {
+            ...out,
+            turnRows: out.turnRows.map((r) => {
+              const held = hold.hp[r.id];
+              if (held === undefined) return r;
+              return { ...r, hp: held, eliminated: held <= 0 };
+            }),
+          };
+        }
         // Convex doesn't stream aim, so the synced power/angle only change on fire —
         // overlay the scene's LIVE local charge onto the action bar so the power meter
         // fills as the player charges. Only while the local player is actively aiming;
         // otherwise the synced value stands (post-fire / opponent turn).
         const live = getLiveAim();
-        if (!live.active || !vm.actionBar.hasLocalMobile) return vm;
-        return {
-          ...vm,
-          actionBar: { ...vm.actionBar, power: live.power, angleDeg: live.angleDeg },
-        };
+        if (live.active && out.actionBar.hasLocalMobile) {
+          out = {
+            ...out,
+            actionBar: { ...out.actionBar, power: live.power, angleDeg: live.angleDeg },
+          };
+        }
+        return out;
       });
     }
 

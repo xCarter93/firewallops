@@ -262,6 +262,39 @@ export function getLiveAim(): LiveAim {
 }
 
 /**
+ * SHOT-HOLD MIRROR for the DOM HUD turn-row HP on the Convex route.
+ *
+ * Convex resolves a shot in ONE doc write — the reduced HP rides the SAME patch as
+ * the new `lastShot.seq`. The scene's canvas defers the HP-bar drop + body-settle
+ * until the projectile lands (its `isAnimatingShot` gate), but the DOM HUD is a
+ * SEPARATE read-only subscription that renders the raw doc HP immediately — so its
+ * turn-row HP number would drop the instant you fire, before the shot visually
+ * lands. While a shot animates, the scene publishes the PRE-shot HP per mobile here
+ * (`setShotHold`), and the play-page HUD binding reads it (`getShotHold`) to hold
+ * each row's HP/eliminated at the pre-shot value until the projectile lands, when
+ * the scene clears it (`active:false`) and the real drop + red pulse fire together
+ * with the canvas. Cosmetic-only — it NEVER affects authority or what `fireShot`
+ * sends; it only re-times the HUD's HP readout to match the impact.
+ */
+export interface ShotHold {
+  active: boolean;
+  /** mobileId → the HP to DISPLAY while the shot is in flight (pre-shot value). */
+  hp: Record<string, number>;
+}
+const _shotHold: ShotHold = { active: false, hp: {} };
+
+/** Scene → HUD: hold turn-row HP at the pre-shot snapshot until the shot lands. */
+export function setShotHold(active: boolean, hp?: Record<string, number>): void {
+  _shotHold.active = active;
+  _shotHold.hp = active && hp ? hp : {};
+}
+
+/** HUD → read the current shot-hold mirror. */
+export function getShotHold(): ShotHold {
+  return _shotHold;
+}
+
+/**
  * Non-consuming peek: is a Convex matchId currently provided? `MatchScene.create`
  * uses this to choose the networked boot path (the Convex training route runs with
  * `VITE_NETWORKED` off — the default dev flag), WITHOUT consuming the slot, which
@@ -449,13 +482,21 @@ export function subscribeMatch(
         handlers.onLocalIdentity?.(doc.localMobileId);
       }
 
-      // The SOLE turn/wind/HP/phase driver (replaces room.onStateChange).
-      handlers.onStateChange(convexDocToSyncedState(doc));
-
-      // lastShot.seq increment → the same animateShot entry as the old shotResult.
-      // The FIRST snapshot after (re)subscribe seeds the baseline without firing, so
-      // a join/reconnect into a match with an existing lastShot does NOT replay a
-      // shot that already resolved; only genuinely newer seqs animate.
+      // SHOT-BEFORE-STATE ORDERING (impact-timing fix). A lastShot.seq increment
+      // must fire onShotResult → animateShot — which arms the scene's
+      // `isAnimatingShot` gate — BEFORE onStateChange feeds this patch's reduced
+      // HP/position. On the Colyseus path the `shotResult` MESSAGE naturally arrived
+      // before the HP state patch, so syncFromState's `if (!isAnimatingShot)` gate
+      // deferred the HP drop + body-settle to the projectile's land callback. Convex
+      // resolves the shot in ONE doc write (reduced HP and the new lastShot.seq ride
+      // the same patch), so we must replicate that order by hand: animate first
+      // (arming the gate), THEN sync. Without this the opponent's HP drops and body
+      // settles the instant you fire, before the projectile visually lands.
+      //
+      // The FIRST snapshot after (re)subscribe seeds the baseline WITHOUT firing
+      // (`initialized` is still false here — it flips at the end of this callback), so
+      // a join/reconnect into a match with an existing lastShot does NOT replay a shot
+      // that already resolved; only genuinely newer seqs animate.
       const shot = doc.lastShot;
       if (shot) {
         if (!initialized) {
@@ -465,6 +506,14 @@ export function subscribeMatch(
           handlers.onShotResult(shot);
         }
       }
+
+      // The SOLE turn/wind/HP/phase driver (replaces room.onStateChange). Runs AFTER
+      // the shot dispatch above so a fresh shot has already armed `isAnimatingShot`;
+      // this patch's reduced HP/position is then deferred to animation-land
+      // (applyHpFromState / applySettleFromState). `syncFromState` still records the
+      // authoritative HP into `syncedHp` regardless of the gate, so the land callback
+      // reconciles to the correct absolute.
+      handlers.onStateChange(convexDocToSyncedState(doc));
 
       // terrainVersion jump → getTerrain → decodeMaskRLE → onTerrainSnapshot (R7).
       const ver = doc.terrainVersion ?? 0;

@@ -39,6 +39,7 @@ import {
   selectItem as convexSelectItem,
   updateAim as convexUpdateAim,
   setLiveAim as convexSetLiveAim,
+  setShotHold as convexSetShotHold,
   subscribeAim as convexSubscribeAim,
   type ConvexNetHandlers,
   type AimTelegraph,
@@ -602,6 +603,10 @@ export class MatchScene extends Phaser.Scene {
       // Tear down the cosmetic aim telegraph alongside the match subscription.
       this.convexAimUnsub?.();
       this.convexAimUnsub = undefined;
+      // Release a shot-hold left armed by a teardown mid-flight (the land callback
+      // bails on `disposed` before clearing it) so a fresh mount never inherits a
+      // stuck hold on the module-level mirror.
+      convexSetShotHold(false);
     });
   }
 
@@ -792,6 +797,17 @@ export class MatchScene extends Phaser.Scene {
     this.isAnimatingShot = true;
     this.phase = "RESOLVING";
 
+    // SHOT-HOLD (Convex DOM-HUD impact-timing): the canvas defers the HP-bar drop +
+    // body-settle via `isAnimatingShot`, but the DOM HUD is a separate read-only
+    // subscription that paints the raw doc HP immediately. Snapshot the PRE-shot HP
+    // (syncFromState hasn't applied this patch's reduced HP yet — onShotResult runs
+    // before onStateChange on the Convex route) and publish it so the HUD holds each
+    // turn-row's HP until the projectile lands, then clear it on land so the drop +
+    // red pulse fire in sync with the canvas. Convex-route only; cosmetic.
+    if (this.convexMatchId) {
+      convexSetShotHold(true, { ...this.syncedHp });
+    }
+
     const totalDamage = result.damage.reduce((s, d) => s + d.amount, 0);
 
     const projectile = new ProjectileView(this);
@@ -839,6 +855,9 @@ export class MatchScene extends Phaser.Scene {
       this.isAnimatingShot = false;
       this.applyHpFromState();
       this.applySettleFromState();
+      // Release the DOM-HUD shot-hold: the HUD now drops to the authoritative HP +
+      // fires its red pulse together with the canvas HP bar (Convex-route only).
+      if (this.convexMatchId) convexSetShotHold(false);
 
       // A terrain snapshot that arrived mid-animation is applied now (race-safe).
       if (this.pendingTerrain) {
