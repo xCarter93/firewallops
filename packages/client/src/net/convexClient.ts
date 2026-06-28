@@ -353,9 +353,14 @@ function startPresenceHeartbeat(matchId: string): () => void {
   const sessionId = newSessionId();
   let sessionToken = "";
   let stopped = false;
+  // Pause the interval heartbeat while the tab is hidden. Chrome THROTTLES (≈1/s)
+  // but does not stop background intervals, so without this the next throttled
+  // beat re-asserts presence ~1s after the visibility-driven disconnect and
+  // un-dims us instantly — the AWAY cue would flicker sub-second and never show.
+  let paused = false;
 
   const beat = (): void => {
-    if (stopped) return;
+    if (stopped || paused) return;
     void client
       .mutation(api.presence.heartbeat, {
         matchId: matchId as unknown as never,
@@ -388,9 +393,13 @@ function startPresenceHeartbeat(matchId: string): () => void {
 
   const onVisibility = (): void => {
     if (typeof document !== "undefined" && document.visibilityState === "hidden") {
+      // Hidden/minimized → STOP heartbeating (so the throttled interval can't
+      // re-assert presence) AND signal AWAY at once so the opponent dims now.
+      paused = true;
       sendDisconnect();
     } else {
       // Returned to the tab → resume presence immediately (un-dim sooner).
+      paused = false;
       beat();
     }
   };
