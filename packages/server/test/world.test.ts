@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { TerrainMask } from "@shared/sim";
-import { MAP, randomDummyX } from "../src/match/world.js";
+import { MAP, randomDummyX } from "@firewallops/match-core";
 
 /**
  * Pure world-helper coverage (Phase 8, TR-5). `randomDummyX` is pure geometry

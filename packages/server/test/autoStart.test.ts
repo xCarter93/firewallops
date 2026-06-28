@@ -6,11 +6,12 @@ import { describe, it, expect } from "vitest";
  *
  * LOBBY-04: pins the `shouldAutoStart(mobileCount, teamSize, readyFlags)`
  * auto-start gate — fires ONLY when seats are full AND every mobile is ready —
- * BEFORE plan 04 ADDS the export to the EXISTING `src/match/turnMachine.js`.
+ * BEFORE plan 04 ADDS the export to the EXISTING `@firewallops/match-core`
+ * turnMachine module.
  *
- * Because `turnMachine.js` ALREADY resolves today, a top-level static import
- * would NOT be RED. So the new export is reached via a dynamic
- * `await import("../src/match/turnMachine.js")` INSIDE the test body and read
+ * Because `@firewallops/match-core` ALREADY resolves today, a top-level static
+ * import would NOT be RED. So the new export is reached via a dynamic
+ * `await import("@firewallops/match-core")` INSIDE the test body and read
  * through a local interface (`AutoStartModule`) that types the not-yet-added
  * export as OPTIONAL — that keeps `tsc` green (no TS2339 for the missing
  * property) while the runtime value is `undefined` until plan 04 lands. The
@@ -30,7 +31,7 @@ interface AutoStartModule {
 
 describe("auto-start", () => {
   it("fires only when seats are full AND all mobiles are ready (LOBBY-04)", async () => {
-    const mod = (await import("../src/match/turnMachine.js")) as AutoStartModule;
+    const mod = (await import("@firewallops/match-core")) as AutoStartModule;
     const shouldAutoStart = mod.shouldAutoStart;
 
     // RED until plan 04 adds the export: undefined → fails this guard.

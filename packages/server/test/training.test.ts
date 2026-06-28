@@ -1,8 +1,9 @@
 import { describe, it, expect } from "vitest";
 import { TerrainMask } from "@shared/sim";
-import { MAP } from "../src/match/world.js";
-import { runServerShot, type ServerMech } from "../src/match/resolve.js";
 import {
+  MAP,
+  runServerShot,
+  type ServerMech,
   shouldStartImmediately,
   shouldAutoStart,
   shouldTrainingRespawn,
@@ -10,8 +11,8 @@ import {
   resetPlayerShotStateOn,
   shouldPublishToLobby,
   shouldRecordResult,
-} from "../src/match/turnMachine.js";
-import { GRAVITY } from "../src/config.js";
+  GRAVITY,
+} from "@firewallops/match-core";
 import { SHOT_1, muzzleOffset } from "@shared/sim";
 import type { ShotInput } from "@shared/sim";
 
@@ -171,7 +172,6 @@ describe("training: a manual RESET wipes the player's shot state (reset / TR-5)"
       ssHitCharge: 2,
       selectedItemId: "trojan",
       power: 80,
-      powerLocked: true,
       accumulatedDelay: 30,
       angleDeg: 12,
     };
@@ -179,7 +179,6 @@ describe("training: a manual RESET wipes the player's shot state (reset / TR-5)"
     expect(player.ssHitCharge).toBe(0);
     expect(player.selectedItemId).toBe("shot-1");
     expect(player.power).toBe(0);
-    expect(player.powerLocked).toBe(false);
     expect(player.accumulatedDelay).toBe(0);
     expect(player.angleDeg).toBe(45);
   });
@@ -190,7 +189,6 @@ describe("training: a manual RESET wipes the player's shot state (reset / TR-5)"
       ssHitCharge: 2,
       selectedItemId: "trojan",
       power: 80,
-      powerLocked: true,
       accumulatedDelay: 30,
       angleDeg: 12,
     };

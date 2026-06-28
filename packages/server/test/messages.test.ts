@@ -4,7 +4,7 @@ import {
   aimSchema,
   selectItemSchema,
   resetRangeSchema,
-} from "../src/match/messageSchemas.js";
+} from "@firewallops/match-core";
 
 /**
  * NET-07 — the exported message schemas reject malformed / out-of-range /

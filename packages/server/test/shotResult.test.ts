@@ -1,9 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { TerrainMask, SHOT_1, muzzleOffset } from "@shared/sim";
 import type { ShotInput } from "@shared/sim";
-import { MAP } from "../src/match/world.js";
-import { runServerShot, type ServerMech } from "../src/match/resolve.js";
-import { GRAVITY } from "../src/config.js";
+import { MAP, runServerShot, type ServerMech, GRAVITY } from "@firewallops/match-core";
 
 /**
  * NET-01 — runServerShot returns the frozen ShotResult shape.

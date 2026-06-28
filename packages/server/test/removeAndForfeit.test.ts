@@ -1,9 +1,8 @@
 import { describe, it, expect } from "vitest";
 import {
   advanceTurn,
-  timeoutOutcome,
   type TurnMobile,
-} from "../src/match/turnMachine.js";
+} from "@firewallops/match-core";
 
 /**
  * RED until plan 05 — Wave-0 contract scaffold (05-VALIDATION.md); dynamic
@@ -12,10 +11,11 @@ import {
  * RECON-04 / H1: pins the `forfeitOutcome(view, leaverSessionId)` decision —
  * idempotent removal + team-elimination win, computed PURELY over a plain-data
  * `TurnMobile[]` view (no Colyseus state touched; the Room applies the result) —
- * BEFORE plan 05 ADDS the export to the EXISTING `src/match/turnMachine.js`.
+ * BEFORE plan 05 ADDS the export to the EXISTING `@firewallops/match-core`
+ * turnMachine module.
  *
- * `turnMachine.js` already resolves, so (like autoStart) the NEW export is
- * reached via a dynamic `await import("../src/match/turnMachine.js")` INSIDE the
+ * `@firewallops/match-core` already resolves, so (like autoStart) the NEW export
+ * is reached via a dynamic `await import("@firewallops/match-core")` INSIDE the
  * test body, read through a local interface that types it as OPTIONAL — keeping
  * `tsc` green (no TS2339) while the runtime value is `undefined` until plan 05.
  * The `expect(forfeitOutcome).toBeTypeOf("function")` guard fails RED until then,
@@ -41,14 +41,13 @@ function mobile(over: Partial<TurnMobile> = {}): TurnMobile {
     team: 0,
     hp: 100,
     accumulatedDelay: 0,
-    powerLocked: false,
     ...over,
   };
 }
 
 describe("removeAndForfeit", () => {
   it("forfeitOutcome removes a leaver, decides team-elim, and is idempotent (RECON-04 / H1)", async () => {
-    const mod = (await import("../src/match/turnMachine.js")) as ForfeitModule;
+    const mod = (await import("@firewallops/match-core")) as ForfeitModule;
     const forfeitOutcome = mod.forfeitOutcome;
 
     // RED until plan 05 adds the export: undefined → fails this guard.
@@ -85,23 +84,18 @@ describe("removeAndForfeit", () => {
 /**
  * RECON-03 (review MEDIUM — the connection-independent timer was previously only
  * manually covered). The Room's turn timer is connection-independent: when a
- * DROPPED active player's turn/window elapses, `onTimeout` runs the PURE seam the
- * Room relies on — `timeoutOutcome(active)` decides auto-fire (locked) vs skip,
- * and the subsequent `startTurn` calls `advanceTurn(view)` to pick the NEXT
- * active. This proves the turn advances away from the dropped player regardless of
- * `connected`. (The full WebSocket timer wiring stays in the manual UAT; these
- * pure helpers are the unit-testable seam.)
+ * DROPPED active player's turn/window elapses, `onTimeout` SKIPS the turn (Phase 9
+ * D-02: SKIP-only — the old auto-fire path is removed), and the subsequent
+ * `startTurn` calls `advanceTurn(view)` to pick the NEXT active. This proves the
+ * turn advances away from the dropped player regardless of `connected`. (The full
+ * WebSocket timer wiring stays in the manual UAT; these pure helpers are the
+ * unit-testable seam.)
  */
 describe("active-drop timeout (RECON-03)", () => {
-  it("timeoutOutcome advances regardless of connected, and advanceTurn picks a non-leaver next active", () => {
-    // The active (dropped) mobile WITHOUT a committed power → the timeout SKIPS
-    // (yields the turn). With a locked power it AUTO-FIRES. Either branch advances
-    // — neither stalls — and `connected` is not even part of the pure view.
-    const droppedSkip = mobile({ sessionId: "leaver", team: 0, powerLocked: false });
-    expect(timeoutOutcome(droppedSkip).kind).toBe("skip");
-    const droppedLocked = mobile({ sessionId: "leaver", team: 0, powerLocked: true });
-    expect(timeoutOutcome(droppedLocked).kind).toBe("auto-fire");
-
+  it("the timeout advances regardless of connected, and advanceTurn picks a non-leaver next active", () => {
+    // Phase 9 (D-02): the timeout is SKIP-only — it never auto-fires. The dropped
+    // active simply yields and the Room advances. `connected` is not even part of
+    // the pure view.
     // After the dropped active's turn elapses and the Room advances, the next
     // active selected from the remaining view is a DIFFERENT, living sessionId.
     const afterRemoval: TurnMobile[] = [

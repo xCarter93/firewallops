@@ -5,8 +5,8 @@ import {
   PROJECTILE_PTS_PER_MS,
   PROJECTILE_MIN_FLIGHT_MS,
   PROJECTILE_MAX_FLIGHT_MS,
-} from "../src/config.js";
-import { settledY } from "../src/match/world.js";
+  settledY,
+} from "@firewallops/match-core";
 
 /**
  * Pure RESOLVING-dwell + settle helpers (turn-timing + gravity rework).

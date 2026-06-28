@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { resolvePort, resolveBindHost } from "../src/index.js";
 import { resolveRedisWiring } from "../src/redis.js";
-import { teamSizeForMode } from "../src/config.js";
+import { teamSizeForMode } from "@firewallops/match-core";
 
 /**
  * Wave-0 config-resolution test (DEPLOY-02 / DEPLOY-04 / Codex concern #4).

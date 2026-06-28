@@ -1,8 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { TerrainMask } from "@shared/sim";
-import { MAP } from "../src/match/world.js";
-import { runServerShot, type ServerMech } from "../src/match/resolve.js";
-import { GRAVITY } from "../src/config.js";
+import { MAP, runServerShot, type ServerMech, GRAVITY } from "@firewallops/match-core";
 import {
   clampAbsoluteAngle,
   AIM_WINDOW,

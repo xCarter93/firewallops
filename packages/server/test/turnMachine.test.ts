@@ -4,12 +4,11 @@ import {
   checkWinTeam,
   assignTeam,
   seatsFull,
-  timeoutOutcome,
   canFire,
   toTurnMobile,
   type TurnMobile,
-} from "../src/match/turnMachine.js";
-import { FORFEIT_DELAY } from "../src/config.js";
+  FORFEIT_DELAY,
+} from "@firewallops/match-core";
 
 /**
  * Pure turn-machine coverage (NET-02 / NET-03 / NET-04). No live WS server — the
@@ -23,7 +22,6 @@ function mobile(over: Partial<TurnMobile> = {}): TurnMobile {
     team: 0,
     hp: 100,
     accumulatedDelay: 0,
-    powerLocked: false,
     ...over,
   };
 }
@@ -137,7 +135,6 @@ describe("turnView mapping: a view built via toTurnMobile never picks the passiv
     team: 0,
     hp: 100,
     accumulatedDelay: 30,
-    powerLocked: false,
     passive: false,
   };
   const dummyRecord = {
@@ -145,7 +142,6 @@ describe("turnView mapping: a view built via toTurnMobile never picks the passiv
     team: 1,
     hp: 100,
     accumulatedDelay: 0,
-    powerLocked: false,
     passive: true,
   };
 
@@ -186,17 +182,13 @@ describe("gate rejects out-of-turn and wrong-phase fire (NET-02)", () => {
   });
 });
 
-describe("forfeit auto-fires when power locked, skips otherwise (NET-04)", () => {
-  it("timeoutOutcome is auto-fire when powerLocked, skip otherwise", () => {
-    expect(timeoutOutcome(mobile({ powerLocked: true }))).toEqual({
-      kind: "auto-fire",
-    });
-    expect(timeoutOutcome(mobile({ powerLocked: false }))).toEqual({
-      kind: "skip",
-    });
-  });
-
-  it("forfeit skip branch advances the turn and applies FORFEIT_DELAY (injected-clock integration)", () => {
+describe("turn timeout SKIPS the turn and applies FORFEIT_DELAY (NET-04, Phase 9 D-02 SKIP-only)", () => {
+  // Phase 9 (D-02): the timeout is SKIP-only — the old `timeoutOutcome` auto-fire
+  // branch (fire the last streamed aim on a locked power) was REMOVED. A timeout
+  // now ALWAYS yields the turn (apply FORFEIT_DELAY, advance, fire nothing). The
+  // authoritative SKIP behavior is proven at the mutation level in plan 05's
+  // scheduler.test.ts; this harness proves the pure delay-queue advance.
+  it("the skip branch advances the turn and applies FORFEIT_DELAY (injected-clock integration)", () => {
     // A minimal Room-logic harness driven by the pure transition functions + a
     // fake clock: TURN_START → AIMING → (timeout) → verify advance + FORFEIT.
     type Scheduled = { fn: () => void; at: number };
@@ -220,19 +212,18 @@ describe("forfeit auto-fires when power locked, skips otherwise (NET-04)", () =>
 
     const clock = new FakeClock();
     const mobiles: TurnMobile[] = [
-      mobile({ sessionId: "a", accumulatedDelay: 0, powerLocked: false }),
-      mobile({ sessionId: "b", accumulatedDelay: 5, powerLocked: false }),
+      mobile({ sessionId: "a", accumulatedDelay: 0 }),
+      mobile({ sessionId: "b", accumulatedDelay: 5 }),
     ];
     let phase = "WAITING";
     let activePlayer = "";
 
     const TURN_MS = 100;
     const onTimeout = () => {
+      // SKIP-only: the timeout unconditionally penalizes the delay accumulator and
+      // advances. It never auto-fires (D-02).
       const active = mobiles.find((m) => m.sessionId === activePlayer)!;
-      const outcome = timeoutOutcome(active);
-      if (outcome.kind === "skip") {
-        active.accumulatedDelay += FORFEIT_DELAY;
-      }
+      active.accumulatedDelay += FORFEIT_DELAY;
       startTurn();
     };
     const enterAiming = () => {

@@ -1,10 +1,14 @@
 import { describe, it, expect } from "vitest";
 import { TerrainMask } from "@shared/sim";
-import { MAP } from "../src/match/world.js";
-import { runServerShot, type ServerMech } from "../src/match/resolve.js";
-import { shouldResolveFire } from "../src/match/turnMachine.js";
-import { fireSchema } from "../src/match/messageSchemas.js";
-import { SS_HITS_TO_ARM, GRAVITY } from "../src/config.js";
+import {
+  MAP,
+  runServerShot,
+  type ServerMech,
+  shouldResolveFire,
+  fireSchema,
+  SS_HITS_TO_ARM,
+  GRAVITY,
+} from "@firewallops/match-core";
 import { SHOT_1, TROJAN, muzzleOffset } from "@shared/sim";
 import type { ShotInput } from "@shared/sim";
 

@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   buildMatchStartPlayers,
   type PersistableMobile,
-} from "../src/match/matchPersistence.js";
+} from "@firewallops/match-core";
 
 describe("buildMatchStartPlayers", () => {
   const mobiles: PersistableMobile[] = [

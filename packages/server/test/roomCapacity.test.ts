@@ -1,6 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { seatsFull, shouldAutoStart } from "../src/match/turnMachine.js";
-import { teamSizeForMode } from "../src/config.js";
+import { seatsFull, shouldAutoStart, teamSizeForMode } from "@firewallops/match-core";
 
 /**
  * Room-capacity discipline (review HIGH) — LOBBY-03 / LOBBY-04.

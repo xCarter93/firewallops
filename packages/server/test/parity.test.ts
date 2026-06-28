@@ -9,9 +9,7 @@ import {
   resolveShot,
 } from "@shared/sim";
 import type { Mech, ShotInput, Carve, Damage } from "@shared/sim";
-import { MAP } from "../src/match/world.js";
-import { runServerShot, type ServerMech } from "../src/match/resolve.js";
-import { GRAVITY } from "../src/config.js";
+import { MAP, runServerShot, type ServerMech, GRAVITY } from "@firewallops/match-core";
 import { MatchController } from "../../client/src/match/MatchController.js";
 import { createInitialState } from "../../client/src/match/MatchState.js";
 
