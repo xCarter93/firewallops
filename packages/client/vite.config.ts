@@ -13,8 +13,14 @@ export default defineConfig({
   build: {
     rollupOptions: {
       output: {
-        manualChunks: {
-          phaser: ["phaser"],
+        // Vite 8 / Rolldown requires manualChunks in FUNCTION form — the object
+        // form hard-fails the Rolldown build ("Invalid type: Expected Function
+        // but received Object"). Keep phaser split into its own chunk so the
+        // dynamic import("phaser") boundary stays off the entry bundle (HD-09).
+        // Rolldown's native successor API is `advancedChunks`; we intentionally
+        // stay on the function form here for a minimal bump-only diff.
+        manualChunks(id: string) {
+          if (id.includes("node_modules/phaser/")) return "phaser";
         },
       },
     },
