@@ -17,7 +17,7 @@
 import { describe, it, expect } from "vitest";
 import { convexTest } from "convex-test";
 import schema from "./schema";
-import { api } from "./_generated/api";
+import { api, internal } from "./_generated/api";
 
 // convex-test discovers every Convex module via this glob (edge-runtime).
 const modules = import.meta.glob("./**/*.ts");
@@ -35,7 +35,7 @@ describe("accounts authed profile (Plan 09-11, review [A1])", () => {
     const asA = t.withIdentity({ subject: SUB_A });
 
     // Provision A's row, then set a handle for A.
-    await t.mutation(api.accounts.provision, { authUserId: SUB_A });
+    await t.mutation(internal.accounts.provision, { authUserId: SUB_A });
     await asA.mutation(api.accounts.setMyDisplayName, { displayName: "N1GHTW1RE" });
 
     const row = await asA.query(api.accounts.getMyProfile, {});

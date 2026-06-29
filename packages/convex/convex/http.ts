@@ -14,7 +14,7 @@
  *   - A bad / replayed signature → `verify` throws → we return 400 and NEVER
  *     provision.
  *   - On a verified `user.created` event we provision idempotently via
- *     `api.accounts.provision` (idempotent by `auth_user_id`, so a Svix
+ *     `internal.accounts.provision` (idempotent by `auth_user_id`, so a Svix
  *     re-delivery — Svix retries on a non-2xx — is safe).
  *   - `CLERK_WEBHOOK_SECRET` is read from the Convex deployment env (set in the
  *     Convex dashboard — a FOUNDER action, NOT committed).
@@ -27,7 +27,7 @@
 import { httpRouter } from "convex/server";
 import { Webhook } from "svix";
 import { httpAction } from "./_generated/server";
-import { api } from "./_generated/api";
+import { internal } from "./_generated/api";
 
 /**
  * The Clerk `user.created` provisioning webhook, as a Convex HTTP action.
@@ -59,7 +59,9 @@ const clerkWebhook = httpAction(async (ctx, request) => {
 
   if (evt.type === "user.created" && evt.data?.id) {
     // Idempotent by auth_user_id, so a Svix re-delivery is safe.
-    await ctx.runMutation(api.accounts.provision, { authUserId: evt.data.id });
+    await ctx.runMutation(internal.accounts.provision, {
+      authUserId: evt.data.id,
+    });
   }
   return new Response(null, { status: 200 });
 });

@@ -22,7 +22,7 @@
  *     If no start row exists (a write was lost), it inserts a terminal row so the
  *     match end is still recorded (with an empty roster — best-effort).
  */
-import { mutation } from "./_generated/server";
+import { internalMutation } from "./_generated/server";
 import { v } from "convex/values";
 
 const playerValidator = v.object({
@@ -31,7 +31,7 @@ const playerValidator = v.object({
   displayName: v.string(),
 });
 
-export const recordStart = mutation({
+export const recordStart = internalMutation({
   args: {
     roomId: v.string(),
     mode: v.string(),
@@ -56,7 +56,7 @@ export const recordStart = mutation({
   },
 });
 
-export const recordEnd = mutation({
+export const recordEnd = internalMutation({
   args: {
     roomId: v.string(),
     status: v.union(v.literal("ended"), v.literal("abandoned")),

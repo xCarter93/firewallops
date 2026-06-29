@@ -1,10 +1,13 @@
 /**
  * Account persistence mutations + queries (Phase 5 — AUTH-04 / AUTH-05).
  *
- * Convex is PERSISTENCE ONLY (per the Architectural Responsibility Map): the
- * Meta-API owns token verification + provisioning, the authoritative room owns
- * W/L authorship; these mutations are the durable seams those callers invoke via
- * `ConvexHttpClient.mutation(api.accounts.*)`.
+ * Convex is PERSISTENCE ONLY (per the Architectural Responsibility Map). The
+ * server-only seams (`provision`, `recordResult`) are `internalMutation` — absent
+ * from the public `api`, reachable ONLY via `ctx.runMutation(internal.accounts.*)`
+ * from the Svix-verified webhook (`http.ts`) and the authoritative turn machine
+ * (`match.ts`/`match_internal.ts`). The live PUBLIC profile path is the
+ * identity-derived `getMyProfile`/`setMyDisplayName` (own-row only, keyed off the
+ * verified Clerk `sub`).
  *
  * CROSS-PLAN CONTRACTS this module OWNS (plans 04 + 05 consume identically):
  *   - OUTCOME MODEL (Blocker 2): `recordResult` takes an EXPLICIT per-player
@@ -17,14 +20,13 @@
  *     final-match write and an abandon write for the same room+player never
  *     collide (the old `resultId: roomId` collided).
  *   - DISPLAY NAME (Blocker 1): the public game handle = `accounts.display_name`,
- *     exposed via `getByAuthUserId` (read) + `setDisplayName` (write). Plan 04
- *     reads it server-side and syncs it as the PUBLIC `Mobile.displayName`; the
+ *     written/read via the identity-derived `setMyDisplayName`/`getMyProfile`. The
  *     Clerk `sub`/accountId stays server-side only and is NEVER a synced field.
  *
  * Every account read/write hits the existing `by_auth_user_id` index — no
  * full-table scan (Convex 32k-scan cap safe).
  */
-import { mutation, query, type QueryCtx } from "./_generated/server";
+import { internalMutation, mutation, query, type QueryCtx } from "./_generated/server";
 import { v } from "convex/values";
 
 /**
@@ -34,7 +36,7 @@ import { v } from "convex/values";
  * existing row instead of inserting a duplicate. Called by the Clerk
  * `user.created` webhook handler.
  */
-export const provision = mutation({
+export const provision = internalMutation({
   args: { authUserId: v.string() },
   handler: async (ctx, { authUserId }) => {
     const existing = await ctx.db
@@ -51,31 +53,6 @@ export const provision = mutation({
 });
 
 /**
- * Set the public game handle (`display_name`) for the first-login handle prompt
- * (AUTH-04, Blocker 1). Handles the handle-prompt-BEFORE-webhook race: if the
- * account row does not exist yet, insert it (with the name) rather than failing.
- */
-export const setDisplayName = mutation({
-  args: { authUserId: v.string(), displayName: v.string() },
-  handler: async (ctx, { authUserId, displayName }) => {
-    const existing = await ctx.db
-      .query("accounts")
-      .withIndex("by_auth_user_id", (q) => q.eq("auth_user_id", authUserId))
-      .unique();
-    if (existing) {
-      await ctx.db.patch(existing._id, { display_name: displayName });
-      return existing._id;
-    }
-    return await ctx.db.insert("accounts", {
-      auth_user_id: authUserId,
-      display_name: displayName,
-      wins: 0,
-      losses: 0,
-    });
-  },
-});
-
-/**
  * Record an EXPLICIT per-player match outcome (AUTH-05, Blocker 2).
  *
  * NO boolean win-flag. Granular per-player+event idempotency via `result_events`:
@@ -85,7 +62,7 @@ export const setDisplayName = mutation({
  *   3. apply the outcome: `win`→wins+1; `loss` OR `abandon_loss`→losses+1;
  *      `draw`→patch NOTHING (counts as neither).
  */
-export const recordResult = mutation({
+export const recordResult = internalMutation({
   args: {
     authUserId: v.string(),
     outcome: v.union(
@@ -130,20 +107,6 @@ export const recordResult = mutation({
 });
 
 /**
- * Read an account by auth user id for the profile read (display_name + wins +
- * losses), via the `by_auth_user_id` index. Returns the row or null.
- */
-export const getByAuthUserId = query({
-  args: { authUserId: v.string() },
-  handler: async (ctx, { authUserId }) => {
-    return await ctx.db
-      .query("accounts")
-      .withIndex("by_auth_user_id", (q) => q.eq("auth_user_id", authUserId))
-      .unique();
-  },
-});
-
-/**
  * The hard length bound on a display handle (`accounts.display_name`). Mirrors the
  * client handle-modal `maxLength = 24` (overlays.ts) so the server is the final
  * authority on the bound the UI advertises. A handle longer than this is rejected
@@ -156,8 +119,7 @@ const MAX_DISPLAY_NAME_LEN = 24;
 // (server/src/meta/routes.ts). The REST routes derived the accountId from the
 // verified Bearer `sub` (NEVER the body); these mirror that EXACTLY by deriving
 // `accountId = getUserIdentity().subject` and accepting NO id from args (D-08).
-// They reuse the existing index-backed `getByAuthUserId`/`setDisplayName` paths;
-// the underlying functions are unchanged.
+// Each inlines its own `by_auth_user_id` index lookup (read / insert-or-patch).
 
 /** Reject when unauthenticated + return the verified Clerk subject (D-08/D-10). */
 async function requireSubject(ctx: QueryCtx): Promise<string> {
@@ -172,7 +134,7 @@ async function requireSubject(ctx: QueryCtx): Promise<string> {
  * a caller can only ever read their OWN row (T-09-28). Returns the `accounts` row
  * (display_name + wins + losses) for that subject, or `null` when no row exists
  * yet (drives the first-login handle prompt). Rejects unauthenticated callers (no
- * leak). Reuses the same `by_auth_user_id` index `getByAuthUserId` uses.
+ * leak). Reads via the `by_auth_user_id` index (own-row only).
  */
 export const getMyProfile = query({
   args: {},
@@ -193,8 +155,8 @@ export const getMyProfile = query({
  *     id is structurally impossible (the only arg is `displayName`).
  *   - validates a non-empty handle within `MAX_DISPLAY_NAME_LEN` (the REST 400-on-
  *     empty parity, extended with the upper bound the UI advertises).
- *   - persists via the existing `setDisplayName` path (insert-or-patch by index),
- *     which also handles the handle-prompt-BEFORE-webhook race.
+ *   - persists via an insert-or-patch by the `by_auth_user_id` index, which also
+ *     handles the handle-prompt-BEFORE-webhook race.
  * Rejects unauthenticated callers.
  */
 export const setMyDisplayName = mutation({

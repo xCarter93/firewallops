@@ -22,7 +22,7 @@
  *     [I]) so the client learns its seat without `accountId` crossing the wire.
  */
 import { mutation, query, type QueryCtx } from "./_generated/server";
-import { internal, api } from "./_generated/api";
+import { internal } from "./_generated/api";
 import { v } from "convex/values";
 import {
   seatsFull,
@@ -134,8 +134,8 @@ function spawnDummy(mask: TerrainMask): LiveMobile {
 
 /**
  * Resolve the display handle from `accounts.display_name` (Blocker 1 — the PUBLIC
- * game handle), via the same `by_auth_user_id` index `accounts.getByAuthUserId`
- * uses (no full-table scan). Mirrors `MatchRoom.onAuth` resolving the name
+ * game handle), via the `by_auth_user_id` index (no full-table scan). Mirrors
+ * `MatchRoom.onAuth` resolving the name
  * server-side. Falls back to "AGENT" when the account row has no name yet.
  */
 async function resolveDisplayName(
@@ -425,7 +425,7 @@ export const toggleReady = mutation({
           team: m.team,
           displayName: m.displayName,
         }));
-      await ctx.runMutation(api.matchDurability.recordStart, {
+      await ctx.runMutation(internal.matchDurability.recordStart, {
         roomId: matchId,
         mode: match.mode,
         players,
@@ -774,13 +774,13 @@ export const leaveMatch = mutation({
 
     // Record the abandon-loss for a live real match with a bound accountId.
     if (wasInProgress) {
-      await ctx.runMutation(api.accounts.recordResult, {
+      await ctx.runMutation(internal.accounts.recordResult, {
         authUserId: accountId,
         outcome: "abandon_loss",
         resultId: `${matchId}:abandon:${accountId}`,
       });
       // Mark the durable match row "abandoned" (first-terminal-wins).
-      await ctx.runMutation(api.matchDurability.recordEnd, {
+      await ctx.runMutation(internal.matchDurability.recordEnd, {
         roomId: matchId,
         status: "abandoned",
         winnerTeam: outcome.kind === "winner" ? outcome.team : undefined,

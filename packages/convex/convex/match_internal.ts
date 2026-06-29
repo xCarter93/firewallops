@@ -23,7 +23,7 @@
  * human-verify surfacing is plan 08.
  */
 import { internalMutation } from "./_generated/server";
-import { internal, api } from "./_generated/api";
+import { internal } from "./_generated/api";
 import { v } from "convex/values";
 import {
   advanceTurn,
@@ -350,13 +350,13 @@ export const endMatch = internalMutation({
     });
 
     for (const p of finalResults(matchId, mobiles, winnerTeam)) {
-      await ctx.runMutation(api.accounts.recordResult, {
+      await ctx.runMutation(internal.accounts.recordResult, {
         authUserId: p.accountId,
         outcome: p.outcome,
         resultId: p.resultId,
       });
     }
-    await ctx.runMutation(api.matchDurability.recordEnd, {
+    await ctx.runMutation(internal.matchDurability.recordEnd, {
       roomId: matchId,
       status: "ended",
       winnerTeam,
@@ -383,13 +383,13 @@ export const endMatchDraw = internalMutation({
     });
 
     for (const p of finalResults(matchId, mobiles, -1)) {
-      await ctx.runMutation(api.accounts.recordResult, {
+      await ctx.runMutation(internal.accounts.recordResult, {
         authUserId: p.accountId,
         outcome: p.outcome,
         resultId: p.resultId,
       });
     }
-    await ctx.runMutation(api.matchDurability.recordEnd, {
+    await ctx.runMutation(internal.matchDurability.recordEnd, {
       roomId: matchId,
       status: "ended",
       winnerTeam: -1,
