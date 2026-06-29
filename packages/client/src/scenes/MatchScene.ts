@@ -888,7 +888,12 @@ export class MatchScene extends Phaser.Scene {
     this.syncedPhase = "RESULTS";
     for (const view of Object.values(this.mechViews)) view.setActive(false);
     const text = draw ? "DRAW" : `TEAM ${winnerTeam === 0 ? "A" : "B"} WINS`;
-    this.hud.showResultBanner(text);
+    // Mutually exclusive with the DOM post-match overlay (Area C, HD-02): the
+    // in-canvas banner is the SOLE match-end surface ONLY in legacy VITE_DOM_HUD=0
+    // mode. When DOM_HUD is on, play.ts's feedHandlers.onMatchEnded drives the DOM
+    // showPostMatch overlay instead, so suppress this banner to avoid a doubled
+    // surface. (Guard is !DOM_HUD — do NOT invert to `if (DOM_HUD)`.)
+    if (!DOM_HUD) this.hud.showResultBanner(text);
     // Fan the match-end out to the shell so the play page can render the UI-SPEC
     // post-match banner (RETURN TO LOBBY). The scene stays the SINGLE owner of the
     // room listeners (Blocker 3) — the shell consumes via this hook, not a second

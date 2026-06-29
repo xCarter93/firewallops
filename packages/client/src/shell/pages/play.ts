@@ -11,8 +11,8 @@ import {
 } from "../../net/convexClient.js";
 import { mountHudOverlay } from "../hud/hudOverlay.js";
 import { bindHudToRoom } from "../hud/hudBinding.js";
-import type { HudViewModel } from "../hud/hudViewModel.js";
-import { showFireRejectedToast } from "./overlays.js";
+import type { HudViewModel, SyncedLike } from "../hud/hudViewModel.js";
+import { showFireRejectedToast, showPostMatch, type MatchOutcome } from "./overlays.js";
 
 /**
  * Play page (UI-SPEC #6/#7/#9) — the THIRD split-shell page (Phase 5/9), pure Convex.
@@ -47,6 +47,34 @@ type HudOverlay = {
   update(vm: HudViewModel, countdownText?: string): void;
   destroy(): void;
 };
+
+/**
+ * Resolve the LOCAL player's match outcome (Area C — re-added helper, NOT new
+ * architecture; mirrors hudViewModel's local-mobile-by-sessionId lookup at
+ * :261-266). `winnerTeam`/`draw` come straight off the Convex RESULTS doc; the
+ * local player's team is read from `state.mobiles` matched against `localSeat`
+ * (the local seat id), so a win/loss is resolved per-seat rather than from
+ * `winnerTeam` alone. Typed against `SyncedLike` (the convexDocToSyncedState
+ * output) so the call site casts `hudRoom.state as SyncedLike` — no `as never`.
+ */
+function resolveOutcome(
+  state: SyncedLike,
+  localSeat: string,
+  winnerTeam: number,
+  draw: boolean,
+): { outcome: MatchOutcome; winnerLabel: string } {
+  if (draw || winnerTeam < 0) return { outcome: "draw", winnerLabel: "" };
+
+  let localTeam: number | undefined;
+  state.mobiles?.forEach((m, key) => {
+    const id = m.sessionId || key; // id-normalization identical to hudViewModel:262.
+    if (id === localSeat) localTeam = m.team;
+  });
+
+  const winnerLabel = winnerTeam === 0 ? "TEAM A" : "TEAM B";
+  const outcome: MatchOutcome = localTeam === winnerTeam ? "win" : "loss";
+  return { outcome, winnerLabel };
+}
 
 /**
  * Render the play page into `root`. Returns a cleanup fn the router runs when
@@ -122,6 +150,8 @@ export function renderPlay(
    */
   const mountConvexMatch = (matchId: string): void => {
     teardownPhaser();
+    /** Fire-once guard for the DOM post-match overlay (HD-03; pairs with disposed). */
+    let shownPostMatch = false;
     root.innerHTML = "";
     const container = document.createElement("div");
     container.id = "game-container"; // GAME_CONFIG.parent === "game-container"
@@ -302,7 +332,26 @@ export function renderPlay(
     const feedHandlers: ConvexNetHandlers = {
       onShotResult: () => {},
       onTerrainSnapshot: () => {},
-      onMatchEnded: () => {},
+      onMatchEnded: (winnerTeam, draw) => {
+        // Mutually exclusive with the in-canvas banner: the DOM overlay fires ONLY
+        // when DOM_HUD (legacy VITE_DOM_HUD=0 keeps the scene's showResultBanner as
+        // the sole surface — see MatchScene.onMatchEnded). Place the gate first so a
+        // !DOM_HUD run never reaches showPostMatch (finding #2, HD-02).
+        if (!DOM_HUD) return;
+        if (disposed || shownPostMatch) return; // fire-once (HD-03).
+        shownPostMatch = true;
+        // onStateChange runs before onMatchEnded in the same onUpdate tick, so
+        // hudRoom.state is already the RESULTS doc — resolve win/loss/draw per-seat.
+        const { outcome, winnerLabel } = resolveOutcome(
+          hudRoom.state as SyncedLike,
+          hudRoom.sessionId,
+          winnerTeam,
+          draw,
+        );
+        // RETURN TO LOBBY reuses the existing exitConvexMatch path (no new flow / no
+        // hard reload, HD-03). track() tears the overlay remover down on dispose.
+        track(showPostMatch(outcome, exitConvexMatch, winnerLabel));
+      },
       onLocalIdentity: (id) => {
         hudRoom.sessionId = id; // the local seat id buildViewModel needs.
       },
