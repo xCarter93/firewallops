@@ -11,7 +11,6 @@
 import type * as accounts from "../accounts.js";
 import type * as cleanup from "../cleanup.js";
 import type * as crons from "../crons.js";
-import type * as health from "../health.js";
 import type * as http from "../http.js";
 import type * as loadout from "../loadout.js";
 import type * as lobby from "../lobby.js";
@@ -31,7 +30,6 @@ declare const fullApi: ApiFromModules<{
   accounts: typeof accounts;
   cleanup: typeof cleanup;
   crons: typeof crons;
-  health: typeof health;
   http: typeof http;
   loadout: typeof loadout;
   lobby: typeof lobby;
